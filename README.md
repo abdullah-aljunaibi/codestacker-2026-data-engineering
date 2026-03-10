@@ -1,194 +1,197 @@
-# 🏗 The 2026 Rihal Data Engineering Talent Challenge
+# Shipment Analytics Pipeline — CodeStacker 2026 Data Engineering Challenge
 
-Welcome to the Rihal Data Engineering Challenge! You have inherited a partially implemented data pipeline that processes shipment data for internal reporting.
+**Submitted by:** Abdullah Al Junaibi  
+**Date:** March 10, 2026
 
-## 📋 Challenge Overview
+---
 
-Your task is to **audit, improve, and harden** this data pipeline to make it production-ready. The system currently runs, but should not be assumed to be correct, reliable, or scalable.
-
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - Docker Desktop installed and running
 - Docker Compose
 - At least 4GB of available RAM
 
-### Setup Instructions
-
-1. **Clone or extract this repository**
-
-2. **Start the services**
-   ```bash
-   docker-compose up -d
-   ```
-
-3. **Wait for services to initialize** (about 2-3 minutes)
-   - Airflow UI will be available at: http://localhost:8080
-   - Mock API at: http://localhost:8000
-   - PostgreSQL at: localhost:5432
-
-4. **Access Airflow**
-   - URL: http://localhost:8080
-   - Username: `admin`
-   - Password: `admin`
-
-5. **Run the pipeline**
-   - Navigate to the DAG: `shipment_analytics_pipeline`
-   - Enable the DAG (toggle switch on the left)
-   - Click the "Play" button to trigger a manual run
-
-6. **Check the results**
-   ```bash
-   docker-compose exec postgres psql -U airflow -d airflow -c "SELECT * FROM analytics.shipping_spend_by_tier ORDER BY year_month, tier;"
-   ```
-
-### Stopping the Services
+### Setup
 
 ```bash
-docker-compose down
+# Clone the repository
+git clone https://github.com/abdullah-aljunaibi/codestacker-2026-data-engineering.git
+cd codestacker-2026-data-engineering
+
+# Start all services
+docker-compose up -d
+
+# Wait ~2-3 minutes for Airflow to initialize, then verify:
+curl http://localhost:8000/health    # Mock API
+curl http://localhost:8080/health    # Airflow
 ```
 
-To remove all data and start fresh:
+### Services
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Airflow UI | http://localhost:8080 | admin / admin |
+| Mock API | http://localhost:8000 | — |
+| PostgreSQL | localhost:5433 | airflow / airflow / airflow |
+
+> **Note:** PostgreSQL is exposed on port **5433** (not 5432) to avoid conflicts with any existing PostgreSQL instance on the host.
+
+### Run the Pipeline
+
+**Option 1 — Via Airflow UI:**
+1. Open http://localhost:8080
+2. Enable the `shipment_analytics_pipeline` DAG
+3. Click "Trigger DAG" (play button)
+
+**Option 2 — Via command line:**
 ```bash
-docker-compose down -v
+docker-compose exec airflow-webserver python -c "
+import sys; sys.path.insert(0, '/opt/airflow/scripts')
+from extract_shipments import extract_shipments_from_api
+from extract_customer_tiers import extract_customer_tiers_from_csv
+from transform_data import transform_shipment_data
+from load_analytics import load_analytics_data
+
+extract_shipments_from_api()
+extract_customer_tiers_from_csv()
+transform_shipment_data()
+load_analytics_data()
+"
 ```
 
-## 📁 Project Structure
+### Check Results
+
+```bash
+docker-compose exec postgres psql -U airflow -d airflow -c \
+  "SELECT * FROM analytics.shipping_spend_by_tier ORDER BY year_month, tier;"
+```
+
+Expected output: 10 rows showing shipping spend per customer tier per month (Jan–Mar 2024).
+
+### Run Tests
+
+```bash
+# From host (requires Python 3.9+ and psycopg2):
+pip install psycopg2-binary pytest
+cd tests && python -m pytest test_pipeline.py -v
+```
+
+### Stop Services
+
+```bash
+docker-compose down       # Stop containers
+docker-compose down -v    # Stop + remove all data
+```
+
+---
+
+## Environment Variables
+
+All pipeline scripts read credentials from environment variables (with defaults for Docker Compose):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POSTGRES_HOST` | `postgres` | Database hostname |
+| `POSTGRES_DB` | `airflow` | Database name |
+| `POSTGRES_USER` | `airflow` | Database user |
+| `POSTGRES_PASSWORD` | `airflow` | Database password |
+| `API_URL` | `http://api:8000/api/shipments` | Shipment API endpoint |
+| `TIERS_CSV_PATH` | `/opt/airflow/data/customer_tiers.csv` | Customer tiers CSV path |
+
+No credentials are hardcoded in any script.
+
+---
+
+## Project Structure
 
 ```
 .
-├── dags/                          # Airflow DAG definitions
-│   └── shipment_analytics_dag.py
-├── scripts/                       # Pipeline scripts
-│   ├── extract_shipments.py      # Extract from API
-│   ├── extract_customer_tiers.py # Extract from CSV
-│   ├── transform_data.py         # Transform and join
-│   └── load_analytics.py         # Load analytics
-├── sql/                           # SQL scripts
-│   └── init.sql                  # Database initialization
-├── data/                          # Source data files
-│   └── customer_tiers.csv
-├── api/                           # Mock external API
-│   ├── app.py
-│   └── Dockerfile
-├── tests/                         # Your tests go here
-├── docker-compose.yml
+├── ENGINEERING_AUDIT.md           # Task 1: 13 issues found and fixed
+├── DESIGN_REFLECTION.md           # Task 5: Design decisions and scaling
+├── README.md                      # This file
+├── docker-compose.yml             # Fixed: YAML indent, port conflicts
 ├── Dockerfile
-└── README.md
+├── dags/
+│   └── shipment_analytics_dag.py  # Airflow DAG orchestration
+├── scripts/
+│   ├── extract_shipments.py       # Fixed: SQL injection, retry, validation, dedup
+│   ├── extract_customer_tiers.py  # Fixed: SCD handling, atomic swap
+│   ├── transform_data.py          # Fixed: LEFT JOIN, orphan handling
+│   └── load_analytics.py          # Fixed: idempotent TRUNCATE+INSERT
+├── sql/
+│   └── init.sql                   # Database schema initialization
+├── data/
+│   └── customer_tiers.csv         # Source: customer tier assignments
+├── api/
+│   ├── app.py                     # Mock shipment API (with deliberate flakiness)
+│   └── Dockerfile
+└── tests/
+    ├── conftest.py                # Test configuration and DB helper
+    ├── test_pipeline.py           # 17 tests across 4 categories
+    ├── test_sample.py             # Original sample test
+    └── requirements.txt           # Test dependencies
 ```
 
-## 📊 Data Flow
+---
 
-1. **Extract Shipment Data** - Fetch from REST API (`http://api:8000/api/shipments`)
-2. **Extract Customer Tiers** - Load from CSV file
-3. **Transform** - Join shipments with customer tier information
-4. **Load Analytics** - Calculate total shipping spend per customer tier per month
+## Data Flow
 
-## 🎯 Your Responsibilities
-
-### Task 1: Engineering Audit
-Create `ENGINEERING_AUDIT.md` documenting:
-- Critical weaknesses in the current system
-- Severity ranking (High/Medium/Low)
-- Potential production impact
-- How you mitigated each issue
-
-### Task 2: Improve the Pipeline
-Make the pipeline production-ready by demonstrating engineering best practices:
-- Data Integrity & Consistency
-- Fault Tolerance & Resilience
-- Security & Compliance
-- Maintainability & Observability
-- Scalability Considerations
-
-### Task 3: Data Integrity & Modeling
-Ensure correct analytical output:
-- **Total Shipping Spend per Customer Tier per Month**
-
-Requirements:
-- Logical data modeling
-- Correct handling of conflicting/duplicate records
-- Clear transformation boundaries
-- Consistent aggregation logic
-
-### Task 4: Testing (Mandatory)
-Create meaningful tests in the `tests/` folder that validate:
-- Core transformation logic behaves as expected
-- Rerunning the pipeline does not corrupt results
-- Critical edge cases are handled correctly
-
-### Task 5: Design Reflection
-Create `DESIGN_REFLECTION.md` answering:
-- What was the most critical issue you discovered?
-- What trade-offs did you make?
-- Where could your solution still fail?
-- How would this system behave at 100x data volume?
-- What would you redesign with more time?
-
-Plus:
-- Explain one complex function line-by-line
-- Explain one SQL transformation step-by-step
-- Describe one alternative design you considered and rejected
-
-## 📤 Submission Requirements
-
-Your submission must include:
-- [ ] All code runs via `docker-compose up`
-- [ ] No manual database intervention required
-- [ ] No hardcoded credentials
-- [ ] `ENGINEERING_AUDIT.md`
-- [ ] `DESIGN_REFLECTION.md`
-- [ ] Meaningful tests in `tests/`
-- [ ] Updated `README.md` with any new setup instructions
-
-## ⚙️ Technical Stack
-
-**Required Technologies:**
-- Apache Airflow
-- Docker & docker-compose
-- Python 3.9+
-- PostgreSQL
-- SQL
-
-You may restructure or refactor as needed, but these core technologies must remain.
-
-## 🔍 Useful Commands
-
-### View Logs
-```bash
-# Airflow logs
-docker-compose logs airflow-scheduler -f
-
-# API logs
-docker-compose logs api -f
-
-# Database logs
-docker-compose logs postgres -f
+```
+┌──────────────┐    ┌───────────────────┐    ┌────────────────┐    ┌──────────────────────┐
+│  Mock API    │───▶│ extract_shipments │───▶│ transform_data │───▶│  load_analytics      │
+│  (REST)      │    │ (validate, dedup) │    │ (LEFT JOIN)    │    │  (TRUNCATE+INSERT)   │
+└──────────────┘    └───────────────────┘    └────────────────┘    └──────────────────────┘
+                                                    ▲
+┌──────────────┐    ┌───────────────────┐           │
+│  CSV file    │───▶│ extract_tiers     │───────────┘
+│              │    │ (SCD dedup)       │
+└──────────────┘    └───────────────────┘
 ```
 
-### Connect to Database
-```bash
-docker-compose exec postgres psql -U airflow -d airflow
-```
+**Pipeline output:** `analytics.shipping_spend_by_tier` — total shipping spend per customer tier per month.
 
-### Check API
-```bash
-curl http://localhost:8000/api/shipments | jq
-```
+---
 
-### Restart Services
-```bash
-docker-compose restart airflow-scheduler airflow-webserver
-```
+## Issues Found & Fixed (Summary)
 
-## 💡 Tips
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | 🔴 Critical | SQL injection in extract_shipments | Parameterized queries |
+| 2 | 🔴 Critical | YAML indentation error | Fixed `postgres:` indent |
+| 3 | 🔴 Critical | API + Airflow port 8080 conflict | API remapped to 8000 |
+| 4 | 🟠 High | Duplicate shipment SHP002 | Dedup by shipment_id |
+| 5 | 🟠 High | No data validation | Reject negatives, nulls, cancelled |
+| 6 | 🟠 High | Duplicate customer tier (SCD) | Keep latest tier_updated_date |
+| 7 | 🟠 High | INNER JOIN drops orphans | LEFT JOIN + COALESCE → 'Unknown' |
+| 8 | 🟡 Medium | No API retry logic | 3 attempts, 5s delay |
+| 9 | 🟡 Medium | Non-idempotent load | TRUNCATE before INSERT |
+| 10 | 🟡 Medium | Non-atomic table swaps | Write _new, DROP old, RENAME |
+| 11 | 🟡 Medium | Hardcoded credentials | Environment variables |
+| 12 | 🔵 Low | Host postgres port conflict | Remapped to 5433 |
+| 13 | 🔵 Low | API artificial latency | Handled via retry logic |
 
-- Start by running the pipeline and observing its behavior
-- Check what data ends up in the database
-- Try running the pipeline multiple times
-- Look for edge cases in the source data
-- Consider what could go wrong in production
-- Think about data quality and consistency
+Full details in [`ENGINEERING_AUDIT.md`](./ENGINEERING_AUDIT.md).
 
+---
 
-**Good luck! We're excited to see your approach to improving this system.**
+## Test Coverage
+
+17 tests across 4 categories — all passing in 0.25s:
+
+| Category | Tests | What's Verified |
+|----------|-------|-----------------|
+| Extraction | 8 | Count, dedup, no negatives, no nulls, no cancelled, tier SCD |
+| Transformation | 3 | Row preservation, orphan→Unknown, all tiers present |
+| Analytics | 5 | Data exists, 10 rows, no negatives, totals match, no dupes |
+| Idempotency | 1 | TRUNCATE+INSERT produces identical results |
+
+---
+
+## Technical Stack
+
+- Apache Airflow 2.x (orchestration)
+- PostgreSQL 13 (storage)
+- Python 3.9 (pipeline scripts)
+- Docker & Docker Compose (infrastructure)
+- pytest (testing)

@@ -1,44 +1,66 @@
 """
-Transform shipment data by joining with customer tiers
+Transform: join shipments with customer tiers.
+Fixes: LEFT JOIN with COALESCE for orphan customers (mapped to 'Unknown'),
+       atomic table swap, source validation.
 """
 import psycopg2
+import os
+
 
 def transform_shipment_data():
-    """
-    Join shipment data with customer tier data and prepare for analytics
-    """
     print("Starting data transformation...")
-    
-    # Connect to database
+
     conn = psycopg2.connect(
-        host="postgres",
-        database="airflow",
-        user="airflow",
-        password="airflow"
+        host=os.environ.get("POSTGRES_HOST", "postgres"),
+        database=os.environ.get("POSTGRES_DB", "airflow"),
+        user=os.environ.get("POSTGRES_USER", "airflow"),
+        password=os.environ.get("POSTGRES_PASSWORD", "airflow"),
     )
     cursor = conn.cursor()
-    
-    # Create combined view
-    cursor.execute("DROP TABLE IF EXISTS staging.shipments_with_tiers;")
-    
-    # Join shipments with customer tier information
+
+    # Validate sources exist
+    cursor.execute("SELECT COUNT(*) FROM staging.shipments;")
+    ship_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM staging.customer_tiers;")
+    tier_count = cursor.fetchone()[0]
+    print(f"  Source: {ship_count} shipments")
+    print(f"  Source: {tier_count} customer tiers")
+
+    if ship_count == 0:
+        raise RuntimeError("No shipments in staging — cannot transform")
+
+    # Atomic table swap with LEFT JOIN
+    cursor.execute("DROP TABLE IF EXISTS staging.shipments_with_tiers_new;")
     cursor.execute("""
-        CREATE TABLE staging.shipments_with_tiers AS
+        CREATE TABLE staging.shipments_with_tiers_new AS
         SELECT 
             s.shipment_id,
             s.customer_id,
             s.shipping_cost,
             s.shipment_date,
             s.status,
-            t.tier,
-            t.customer_name
+            COALESCE(ct.customer_name, 'Unknown') AS customer_name,
+            COALESCE(ct.tier, 'Unknown') AS tier
         FROM staging.shipments s
-        LEFT JOIN staging.customer_tiers t 
-            ON s.customer_id = t.customer_id;
+        LEFT JOIN staging.customer_tiers ct ON s.customer_id = ct.customer_id;
     """)
-    
+
+    # Check for orphans
+    cursor.execute("""
+        SELECT COUNT(*) FROM staging.shipments_with_tiers_new WHERE tier = 'Unknown';
+    """)
+    orphans = cursor.fetchone()[0]
+    if orphans > 0:
+        print(f"  WARNING: {orphans} shipments have no matching customer tier (mapped to 'Unknown')")
+
+    cursor.execute("SELECT COUNT(*) FROM staging.shipments_with_tiers_new;")
+    joined_count = cursor.fetchone()[0]
+    print(f"  Joined result: {joined_count} rows")
+
+    cursor.execute("DROP TABLE IF EXISTS staging.shipments_with_tiers;")
+    cursor.execute("ALTER TABLE staging.shipments_with_tiers_new RENAME TO shipments_with_tiers;")
     conn.commit()
+
     cursor.close()
     conn.close()
-    
     print("Data transformation completed")

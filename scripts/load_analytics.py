@@ -1,25 +1,31 @@
 """
-Load analytics data - calculate total shipping spend per customer tier per month
+Load analytics: aggregate shipping spend per tier per month.
+Fixes: idempotent via TRUNCATE before INSERT, env credentials, summary output.
 """
 import psycopg2
-from datetime import datetime
+import os
+
 
 def load_analytics_data():
-    """
-    Calculate and load final analytics: Total Shipping Spend per Customer Tier per Month
-    """
     print("Starting analytics data load...")
-    
-    # Connect to database
+
     conn = psycopg2.connect(
-        host="postgres",
-        database="airflow",
-        user="airflow",
-        password="airflow"
+        host=os.environ.get("POSTGRES_HOST", "postgres"),
+        database=os.environ.get("POSTGRES_DB", "airflow"),
+        user=os.environ.get("POSTGRES_USER", "airflow"),
+        password=os.environ.get("POSTGRES_PASSWORD", "airflow"),
     )
     cursor = conn.cursor()
-    
-    # Create analytics table if not exists
+
+    # Validate source
+    cursor.execute("SELECT COUNT(*) FROM staging.shipments_with_tiers;")
+    source_count = cursor.fetchone()[0]
+    print(f"  Source: {source_count} rows in shipments_with_tiers")
+
+    if source_count == 0:
+        raise RuntimeError("No data in shipments_with_tiers — cannot load analytics")
+
+    # Ensure analytics table exists
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS analytics.shipping_spend_by_tier (
             tier VARCHAR(50),
@@ -29,24 +35,43 @@ def load_analytics_data():
             calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
-    
-    # Calculate and load analytics
+
+    # Idempotent: truncate then insert
+    cursor.execute("TRUNCATE TABLE analytics.shipping_spend_by_tier;")
     cursor.execute("""
-        INSERT INTO analytics.shipping_spend_by_tier (tier, year_month, total_shipping_spend, shipment_count)
+        INSERT INTO analytics.shipping_spend_by_tier 
+            (tier, year_month, total_shipping_spend, shipment_count, calculated_at)
         SELECT 
-            COALESCE(tier, 'Unknown') as tier,
-            TO_CHAR(shipment_date, 'YYYY-MM') as year_month,
-            SUM(shipping_cost) as total_shipping_spend,
-            COUNT(*) as shipment_count
+            tier,
+            TO_CHAR(shipment_date, 'YYYY-MM') AS year_month,
+            SUM(shipping_cost) AS total_shipping_spend,
+            COUNT(*) AS shipment_count,
+            NOW() AS calculated_at
         FROM staging.shipments_with_tiers
-        GROUP BY tier, TO_CHAR(shipment_date, 'YYYY-MM');
+        GROUP BY tier, TO_CHAR(shipment_date, 'YYYY-MM')
+        ORDER BY year_month, tier;
     """)
-    
-    rows_inserted = cursor.rowcount
-    print(f"Inserted {rows_inserted} rows into analytics table")
-    
+
+    cursor.execute("SELECT COUNT(*) FROM analytics.shipping_spend_by_tier;")
+    row_count = cursor.fetchone()[0]
+    print(f"  Inserted {row_count} rows into analytics.shipping_spend_by_tier")
+
     conn.commit()
+
+    # Print summary
+    cursor.execute("""
+        SELECT tier, year_month, total_shipping_spend, shipment_count
+        FROM analytics.shipping_spend_by_tier
+        ORDER BY year_month, tier;
+    """)
+    rows = cursor.fetchall()
+
+    print(f"\n  {'=== Analytics Summary ===':^50}")
+    print(f"  {'Tier':<15} {'Month':<10} {'Spend':>12} {'Count':>6}")
+    print(f"  {'-'*15} {'-'*10} {'-'*12} {'-'*6}")
+    for tier, month, spend, count in rows:
+        print(f"  {tier:<15} {month:<10} ${spend:>10,.2f} {count:>6}")
+
     cursor.close()
     conn.close()
-    
-    print("Analytics data load completed")
+    print("\nAnalytics data load completed")

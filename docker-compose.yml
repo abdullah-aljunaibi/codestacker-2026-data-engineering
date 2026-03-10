@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   # PostgreSQL Database
- postgres:
+  postgres:
     image: postgres:13
     environment:
       - POSTGRES_USER=airflow
@@ -12,7 +12,7 @@ services:
       - postgres-db-volume:/var/lib/postgresql/data
       - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 5s
@@ -25,7 +25,7 @@ services:
       context: ./api
       dockerfile: Dockerfile
     ports:
-      - "8080:8000"
+      - "8000:8000"
     restart: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -52,6 +52,7 @@ services:
       - ./scripts:/opt/airflow/scripts
       - ./sql:/opt/airflow/sql
       - ./data:/opt/airflow/data
+      - ./tests:/opt/airflow/tests
       - ./logs:/opt/airflow/logs
     ports:
       - "8080:8080"
@@ -84,6 +85,7 @@ services:
       - ./scripts:/opt/airflow/scripts
       - ./sql:/opt/airflow/sql
       - ./data:/opt/airflow/data
+      - ./tests:/opt/airflow/tests
       - ./logs:/opt/airflow/logs
     command: airflow scheduler
 
