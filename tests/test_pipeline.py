@@ -3,8 +3,14 @@ Tests for the shipment analytics pipeline.
 Validates extraction, transformation, analytics, and idempotency.
 Runs from host against postgres on port 5433.
 """
+from pathlib import Path
+import sys
+
 import pytest
 from conftest import get_conn
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from extract_customer_tiers import extract_customer_tiers_from_csv
 
 
 class TestExtraction:
@@ -70,6 +76,111 @@ class TestExtraction:
         cur.close(); conn.close()
         assert row_count == 7, f"Expected 7 customer tier history rows, got {row_count}"
         assert cust002_count == 2, f"Expected 2 history rows for CUST002, got {cust002_count}"
+
+    def test_customer_tiers_contract_enforced(self):
+        conn = get_conn()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT column_name, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = 'staging' AND table_name = 'customer_tiers'
+              AND column_name IN ('customer_id', 'tier', 'tier_updated_date')
+            ORDER BY column_name;
+        """)
+        columns = {column_name: is_nullable for column_name, is_nullable in cur.fetchall()}
+
+        cur.execute("""
+            SELECT ARRAY_AGG(att.attname ORDER BY att.attname)
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+            JOIN unnest(con.conkey) AS conkey(attnum) ON TRUE
+            JOIN pg_attribute att
+              ON att.attrelid = rel.oid AND att.attnum = conkey.attnum
+            WHERE nsp.nspname = 'staging'
+              AND rel.relname = 'customer_tiers'
+              AND con.contype = 'u'
+            GROUP BY con.oid;
+        """)
+        unique_constraints = cur.fetchall()
+
+        cur.execute("""
+            SELECT pg_get_constraintdef(con.oid)
+            FROM pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+            WHERE nsp.nspname = 'staging'
+              AND rel.relname = 'customer_tiers'
+              AND con.contype = 'c';
+        """)
+        check_constraints = [row[0] for row in cur.fetchall()]
+
+        cur.close(); conn.close()
+
+        assert columns == {
+            'customer_id': 'NO',
+            'tier': 'NO',
+            'tier_updated_date': 'NO',
+        }, f"Unexpected nullability contract: {columns}"
+        assert ['customer_id', 'tier_updated_date'] in unique_constraints, (
+            f"Missing UNIQUE(customer_id, tier_updated_date): {unique_constraints}"
+        )
+        assert any(
+            "tier::text = ANY" in constraint
+            and all(tier in constraint for tier in ('Bronze', 'Silver', 'Gold', 'Platinum'))
+            for constraint in check_constraints
+        ), f"Missing tier CHECK constraint: {check_constraints}"
+
+    @pytest.mark.parametrize(
+        ("csv_text", "error_message"),
+        [
+            (
+                "customer_id,customer_name,tier,tier_updated_date\n"
+                "CUST001,Acme Corporation,Gold,2024-01-01\n"
+                "CUST001,Acme Corporation,Silver,2024-01-01\n",
+                "Duplicate same-day history rows for customer_id 'CUST001' on 2024-01-01",
+            ),
+            (
+                "customer_id,customer_name,tier,tier_updated_date\n"
+                "CUST001,Acme Corporation,Gold,\n",
+                "Row 2: missing tier_updated_date",
+            ),
+            (
+                "customer_id,customer_name,tier,tier_updated_date\n"
+                ",Acme Corporation,Gold,2024-01-01\n",
+                "Row 2: missing customer_id",
+            ),
+            (
+                "customer_id,customer_name,tier,tier_updated_date\n"
+                "CUST001,Acme Corporation,Diamond,2024-01-01\n",
+                "Row 2: invalid tier value 'Diamond'",
+            ),
+        ],
+    )
+    def test_invalid_customer_tier_history_rejected_deterministically(
+        self, tmp_path, monkeypatch, csv_text, error_message
+    ):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM staging.customer_tiers;")
+        before_count = cur.fetchone()[0]
+        cur.close(); conn.close()
+
+        csv_path = tmp_path / "customer_tiers_invalid.csv"
+        csv_path.write_text(csv_text, encoding="utf-8")
+        monkeypatch.setenv("TIERS_CSV_PATH", str(csv_path))
+
+        with pytest.raises(ValueError, match=error_message):
+            extract_customer_tiers_from_csv()
+
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM staging.customer_tiers;")
+        after_count = cur.fetchone()[0]
+        cur.close(); conn.close()
+
+        assert after_count == before_count == 7
 
 
 class TestTransformation:
