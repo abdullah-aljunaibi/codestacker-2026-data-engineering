@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-The pipeline contained **14 distinct issues** spanning security vulnerabilities, data quality bugs, infrastructure conflicts, and missing resilience patterns. All issues have been identified, categorized, and resolved. The fixed pipeline passes 26 automated tests covering extraction validation, raw ingest auditability, transformation correctness, analytics integrity, and idempotency.
+The pipeline contained **14 distinct issues** spanning security vulnerabilities, data quality bugs, infrastructure conflicts, and missing resilience patterns. All issues have been identified, categorized, and resolved. The fixed pipeline passes 27 automated tests covering extraction validation, raw ingest auditability, transformation correctness, analytics integrity, and idempotency.
 
 ---
 
@@ -134,11 +134,11 @@ The pipeline contained **14 distinct issues** spanning security vulnerabilities,
 
 | Category | Tests | Status |
 |----------|-------|--------|
-| Extraction | 12 tests (counts, dedup, validation, raw ledgers, tier history, rejection determinism) | ✅ All pass |
+| Extraction | 16 tests (counts, dedup, validation, raw ledgers, tier history, rejection determinism) | ✅ All pass |
 | Transformation | 4 tests (row count, orphan mapping, effective-dated join, tier coverage) | ✅ All pass |
-| Analytics | 5 tests (data exists, row count, no negatives, spend match, no dupes) | ✅ All pass |
+| Analytics | 6 tests (data exists, row count, monthly totals, no negatives, spend match, no dupes) | ✅ All pass |
 | Idempotency | 1 test (TRUNCATE + INSERT stability) | ✅ All pass |
-| **Total** | **26 tests** | **✅ 26/26 pass** |
+| **Total** | **27 tests** | **✅ 27/27 pass** |
 
 ---
 
@@ -152,5 +152,5 @@ The pipeline contained **14 distinct issues** spanning security vulnerabilities,
 | `scripts/extract_customer_tiers.py` | Raw ingest ledger, rejection ledger, effective-dated history preservation, atomic swap, env vars |
 | `scripts/transform_data.py` | LEFT JOIN + COALESCE, effective-dated customer tier history join, atomic swap, source validation, env vars |
 | `scripts/load_analytics.py` | Idempotent TRUNCATE+INSERT, env vars, analytics summary output |
-| `tests/test_pipeline.py` | 26 automated tests across 4 categories |
+| `tests/test_pipeline.py` | 27 automated tests across 4 categories |
 | `tests/conftest.py` | Test configuration and DB connection helper |

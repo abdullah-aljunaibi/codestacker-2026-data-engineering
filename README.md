@@ -93,6 +93,7 @@ All pipeline scripts read credentials from environment variables (with defaults 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `POSTGRES_HOST` | `postgres` | Database hostname |
+| `POSTGRES_PORT` | `5432` (`5433` when host is `127.0.0.1` or `localhost`) | Database port |
 | `POSTGRES_DB` | `airflow` | Database name |
 | `POSTGRES_USER` | `airflow` | Database user |
 | `POSTGRES_PASSWORD` | `airflow` | Database password |
@@ -111,7 +112,6 @@ No credentials are hardcoded in any script.
 ├── DISTRIBUTION_GUIDE.md          # Submission and evaluator notes
 ├── ENGINEERING_AUDIT.md           # Audit summary of identified issues and fixes
 ├── DESIGN_REFLECTION.md           # Design decisions and scaling notes
-├── QUICK_START_EVALUATORS.md      # Fast-path setup for reviewers
 ├── README.md                      # Project overview and runbook
 ├── docker-compose.yml             # Local services and ports
 ├── Dockerfile
@@ -131,8 +131,7 @@ No credentials are hardcoded in any script.
 │   └── Dockerfile
 └── tests/
     ├── conftest.py                # Test configuration and DB helper
-    ├── test_pipeline.py           # 23 pipeline tests across 4 categories
-    ├── test_sample.py             # Minimal smoke test
+    ├── test_pipeline.py           # 27 pipeline tests across 4 categories
     └── requirements.txt           # Test dependencies
 ```
 
@@ -180,16 +179,14 @@ Full details in [`ENGINEERING_AUDIT.md`](./ENGINEERING_AUDIT.md).
 
 ## Test Coverage
 
-`tests/test_pipeline.py` contains 23 pipeline tests across 4 categories:
+`tests/test_pipeline.py` contains 27 pipeline tests across 4 categories:
 
 | Category | Tests | What's Verified |
 |----------|-------|-----------------|
-| Extraction | 12 | Shipment validation, tier history preservation, schema contract, deterministic rejection of invalid tier-history inputs |
+| Extraction | 16 | Shipment validation, raw-ledger counts, tier history preservation, schema contract, deterministic rejection of invalid tier-history inputs |
 | Transformation | 4 | Row preservation, orphan→Unknown, effective-dated tiering, all tiers present |
 | Analytics | 6 | Data exists, 11 rows, corrected monthly totals, no negatives, totals match, no dupes |
 | Idempotency | 1 | TRUNCATE+INSERT produces identical results |
-
-`tests/test_sample.py` remains as a separate lightweight smoke test.
 
 ---
 

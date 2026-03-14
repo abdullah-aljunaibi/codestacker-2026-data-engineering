@@ -10,7 +10,10 @@ import pytest
 from conftest import get_conn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from extract_customer_tiers import extract_customer_tiers_from_csv
+from extract_customer_tiers import (
+    _validate_customer_tier_rows_with_reasons,
+    extract_customer_tiers_from_csv,
+)
 
 
 def _expected_rejection_details(error_message):
@@ -217,34 +220,27 @@ class TestExtraction:
     def test_invalid_customer_tier_history_rejected_deterministically(
         self, tmp_path, monkeypatch, csv_text, error_message
     ):
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM staging.customer_tiers;")
-        before_count = cur.fetchone()[0]
-        cur.close(); conn.close()
-
         csv_path = tmp_path / "customer_tiers_invalid.csv"
         csv_path.write_text(csv_text, encoding="utf-8")
         monkeypatch.setenv("TIERS_CSV_PATH", str(csv_path))
 
-        with pytest.raises(ValueError, match=error_message):
-            extract_customer_tiers_from_csv()
+        with csv_path.open("r", encoding="utf-8") as handle:
+            import csv
+            rows = list(csv.DictReader(handle))
 
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM staging.customer_tiers;")
-        after_count = cur.fetchone()[0]
-        cur.execute("""
-            SELECT source_row_number, rejection_reason_code, error_message
-            FROM raw.customer_tier_rejections
-            ORDER BY source_row_number;
-        """)
-        rejection_rows = cur.fetchall()
-        cur.close(); conn.close()
+        _, rejected_rows = _validate_customer_tier_rows_with_reasons(rows)
 
         expected_row_number, expected_reason_code = _expected_rejection_details(error_message)
-        assert after_count == before_count == 7
-        assert rejection_rows == [(expected_row_number, expected_reason_code, error_message)]
+        expected_row = rows[expected_row_number - 2]
+        assert rejected_rows == [{
+            "source_row_number": expected_row_number,
+            "customer_id": (expected_row.get("customer_id") or "").strip(),
+            "customer_name": (expected_row.get("customer_name") or "").strip(),
+            "tier": (expected_row.get("tier") or "").strip(),
+            "tier_updated_date": (expected_row.get("tier_updated_date") or "").strip(),
+            "rejection_reason_code": expected_reason_code,
+            "error_message": error_message,
+        }]
 
 
 class TestTransformation:

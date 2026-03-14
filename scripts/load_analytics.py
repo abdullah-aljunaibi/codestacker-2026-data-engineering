@@ -9,12 +9,30 @@ import os
 def load_analytics_data():
     print("Starting analytics data load...")
 
-    conn = psycopg2.connect(
-        host=os.environ.get("POSTGRES_HOST", "postgres"),
-        database=os.environ.get("POSTGRES_DB", "airflow"),
-        user=os.environ.get("POSTGRES_USER", "airflow"),
-        password=os.environ.get("POSTGRES_PASSWORD", "airflow"),
-    )
+    postgres_host = os.environ.get("POSTGRES_HOST")
+    default_host = postgres_host or "postgres"
+    default_port = "5433" if default_host in {"127.0.0.1", "localhost"} else "5432"
+
+    db_config = {
+        "host": default_host,
+        "port": int(os.environ.get("POSTGRES_PORT", default_port)),
+        "database": os.environ.get("POSTGRES_DB", "airflow"),
+        "user": os.environ.get("POSTGRES_USER", "airflow"),
+        "password": os.environ.get("POSTGRES_PASSWORD", "airflow"),
+    }
+
+    try:
+        conn = psycopg2.connect(**db_config)
+    except psycopg2.OperationalError as exc:
+        if (
+            "POSTGRES_HOST" in os.environ
+            or "POSTGRES_PORT" in os.environ
+            or "could not translate host name" not in str(exc)
+        ):
+            raise
+
+        fallback_config = {**db_config, "host": "127.0.0.1", "port": 5433}
+        conn = psycopg2.connect(**fallback_config)
     cursor = conn.cursor()
 
     # Validate source
