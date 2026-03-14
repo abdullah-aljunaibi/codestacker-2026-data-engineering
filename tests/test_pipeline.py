@@ -107,7 +107,7 @@ class TestExtraction:
 
         cur.execute("""
             SELECT
-                pg_get_expr(con.conbin, con.conrelid) AS constraint_expression,
+                pg_get_constraintdef(con.oid) AS constraint_definition,
                 ARRAY_AGG(att.attname ORDER BY att.attname)
             FROM pg_constraint con
             JOIN pg_class rel ON rel.oid = con.conrelid

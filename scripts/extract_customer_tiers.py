@@ -69,42 +69,29 @@ def extract_customer_tiers_from_csv():
     )
     cursor = conn.cursor()
 
-    # Atomic table swap
-    cursor.execute("DROP TABLE IF EXISTS staging.customer_tiers_new;")
     cursor.execute("""
-        CREATE TABLE staging.customer_tiers_new (
+        CREATE TABLE IF NOT EXISTS staging.customer_tiers (
             customer_id VARCHAR(50) NOT NULL,
             customer_name VARCHAR(200),
             tier VARCHAR(50) NOT NULL,
             tier_updated_date DATE NOT NULL,
-            CONSTRAINT customer_tiers_new_customer_id_tier_updated_date_key
+            CONSTRAINT customer_tiers_customer_id_tier_updated_date_key
                 UNIQUE (customer_id, tier_updated_date),
-            CONSTRAINT customer_tiers_new_tier_check
+            CONSTRAINT customer_tiers_tier_check
                 CHECK (tier IN ('Bronze', 'Silver', 'Gold', 'Platinum'))
         );
     """)
+    cursor.execute("TRUNCATE TABLE staging.customer_tiers;")
 
     for row in rows:
         cursor.execute(
-            """INSERT INTO staging.customer_tiers_new 
+            """INSERT INTO staging.customer_tiers
                (customer_id, customer_name, tier, tier_updated_date)
                VALUES (%s, %s, %s, %s);""",
             (row["customer_id"], row["customer_name"],
              row["tier"], row["tier_updated_date"]),
         )
 
-    cursor.execute("DROP TABLE IF EXISTS staging.customer_tiers;")
-    cursor.execute("ALTER TABLE staging.customer_tiers_new RENAME TO customer_tiers;")
-    cursor.execute("""
-        ALTER TABLE staging.customer_tiers
-        RENAME CONSTRAINT customer_tiers_new_customer_id_tier_updated_date_key
-        TO customer_tiers_customer_id_tier_updated_date_key;
-    """)
-    cursor.execute("""
-        ALTER TABLE staging.customer_tiers
-        RENAME CONSTRAINT customer_tiers_new_tier_check
-        TO customer_tiers_tier_check;
-    """)
     conn.commit()
 
     print(f"Loaded {len(rows)} customer tier history rows into staging.customer_tiers")
