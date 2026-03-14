@@ -106,15 +106,21 @@ class TestExtraction:
         unique_constraints = cur.fetchall()
 
         cur.execute("""
-            SELECT pg_get_constraintdef(con.oid)
+            SELECT
+                pg_get_expr(con.conbin, con.conrelid) AS constraint_expression,
+                ARRAY_AGG(att.attname ORDER BY att.attname)
             FROM pg_constraint con
             JOIN pg_class rel ON rel.oid = con.conrelid
             JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+            JOIN pg_attribute att
+              ON att.attrelid = rel.oid
+             AND att.attnum = ANY (con.conkey)
             WHERE nsp.nspname = 'staging'
               AND rel.relname = 'customer_tiers'
-              AND con.contype = 'c';
+              AND con.contype = 'c'
+            GROUP BY con.oid;
         """)
-        check_constraints = [row[0] for row in cur.fetchall()]
+        check_constraints = cur.fetchall()
 
         cur.close(); conn.close()
 
@@ -127,9 +133,9 @@ class TestExtraction:
             f"Missing UNIQUE(customer_id, tier_updated_date): {unique_constraints}"
         )
         assert any(
-            "tier::text = ANY" in constraint
-            and all(tier in constraint for tier in ('Bronze', 'Silver', 'Gold', 'Platinum'))
-            for constraint in check_constraints
+            columns == ['tier']
+            and all(tier in constraint_expression for tier in ('Bronze', 'Silver', 'Gold', 'Platinum'))
+            for constraint_expression, columns in check_constraints
         ), f"Missing tier CHECK constraint: {check_constraints}"
 
     @pytest.mark.parametrize(

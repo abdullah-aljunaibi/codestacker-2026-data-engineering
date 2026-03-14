@@ -95,6 +95,16 @@ def extract_customer_tiers_from_csv():
 
     cursor.execute("DROP TABLE IF EXISTS staging.customer_tiers;")
     cursor.execute("ALTER TABLE staging.customer_tiers_new RENAME TO customer_tiers;")
+    cursor.execute("""
+        ALTER TABLE staging.customer_tiers
+        RENAME CONSTRAINT customer_tiers_new_customer_id_tier_updated_date_key
+        TO customer_tiers_customer_id_tier_updated_date_key;
+    """)
+    cursor.execute("""
+        ALTER TABLE staging.customer_tiers
+        RENAME CONSTRAINT customer_tiers_new_tier_check
+        TO customer_tiers_tier_check;
+    """)
     conn.commit()
 
     print(f"Loaded {len(rows)} customer tier history rows into staging.customer_tiers")
