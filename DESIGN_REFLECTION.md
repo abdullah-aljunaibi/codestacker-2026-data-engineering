@@ -36,7 +36,7 @@ I used a fixed 5-second delay between retries (3 attempts). Exponential backoff 
 At 100x scale (~2,100 shipments per batch, or continuous streaming), the current architecture would need these changes:
 
 ### Short-term (10x–50x)
-- **Batch INSERT instead of row-by-row:** Replace the Python loop with `executemany()` or `COPY FROM` for bulk loading. Current row-by-row inserts become the bottleneck first.
+- **Batch INSERT instead of row-by-row:** Replace the Python loop with `executemany()` or `COPY FROM` for bulk loading into the raw ingest layer. Current row-by-row inserts become the bottleneck first.
 - **Connection pooling:** Use `psycopg2.pool` or PgBouncer instead of opening/closing connections per script.
 - **Pagination:** The API currently returns all shipments in one response. At scale, paginate with `?page=1&limit=1000`.
 
@@ -56,21 +56,21 @@ At 100x scale (~2,100 shipments per batch, or continuous streaming), the current
 
 ### Extract (`extract_shipments.py`)
 ```
-API → Retry (3x) → Validate → Deduplicate → Atomic Load
+API → Retry (3x) → Raw Ingest → Validate → Deduplicate → Atomic Load
 ```
-The extraction script is the most complex because it handles the most failure modes: network errors (retry), bad data (validation), duplicate records (dedup), and crash safety (atomic swap). Each concern is a separate step, making it easy to test and modify independently.
+The extraction script is the most complex because it handles the most failure modes: network errors (retry), source traceability (raw ingest + rejection ledger), bad data (validation), duplicate records (dedup), and crash safety (atomic swap). Each concern is a separate step, making it easy to test and modify independently.
 
 ### Extract (`extract_customer_tiers.py`)
 ```
-CSV → Parse → SCD Dedup (latest date) → Atomic Load
+CSV → Parse → Raw Ingest → Validate History → Effective-Dated Load
 ```
-Simpler than shipments because CSV is a local file (no network failures). The key decision was SCD Type 1 handling: when a customer appears twice, keep the row with the most recent `tier_updated_date`.
+Simpler than shipments because CSV is a local file (no network failures). The important change was preserving customer tier history instead of collapsing it. This is effectively SCD Type 2-like behavior: retain all valid `(customer_id, tier_updated_date)` rows, then resolve each shipment to the most recent tier effective on its shipment date. For `CUST002`, that means Platinum before 2024-02-15 and Gold after.
 
 ### Transform (`transform_data.py`)
 ```
-Validate Sources → LEFT JOIN + COALESCE → Atomic Load
+Validate Sources → Effective-Dated LEFT JOIN + COALESCE → Atomic Load
 ```
-The transform is a single SQL operation. Using `LEFT JOIN` instead of `INNER JOIN` was the critical fix — it preserves all shipment data even when tier information is missing.
+The transform is a single SQL operation. Using `LEFT JOIN` instead of `INNER JOIN` was the critical fix — it preserves all shipment data even when tier information is missing. The join also applies the effective-date rule, so shipments are classified against the correct historical tier version.
 
 ### Load (`load_analytics.py`)
 ```

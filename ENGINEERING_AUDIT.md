@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-The pipeline contained **13 distinct issues** spanning security vulnerabilities, data quality bugs, infrastructure conflicts, and missing resilience patterns. All issues have been identified, categorized, and resolved. The fixed pipeline passes 17 automated tests covering extraction validation, transformation correctness, analytics integrity, and idempotency.
+The pipeline contained **14 distinct issues** spanning security vulnerabilities, data quality bugs, infrastructure conflicts, and missing resilience patterns. All issues have been identified, categorized, and resolved. The fixed pipeline passes 26 automated tests covering extraction validation, raw ingest auditability, transformation correctness, analytics integrity, and idempotency.
 
 ---
 
@@ -64,12 +64,12 @@ The pipeline contained **13 distinct issues** spanning security vulnerabilities,
 - **Impact:** Negative costs distort spend totals; null customer_id causes join failures; cancelled shipments inflate counts.
 - **Fix:** Added validation rules: reject negative costs, null customer IDs, and cancelled shipments. Clear rejection logging for auditability.
 
-#### 6. Duplicate Customer Tier (SCD Not Handled)
+#### 6. Customer Tier History Was Collapsed Incorrectly
 - **Severity:** High
 - **Category:** Data Quality
 - **Detail:** `CUST002` appears twice in `customer_tiers.csv` — Platinum (Jan 1) and Gold (Feb 15). No Slowly Changing Dimension handling existed.
-- **Impact:** Non-deterministic tier assignment depending on insertion order.
-- **Fix:** SCD Type 1 — keep the most recent `tier_updated_date` per customer. CUST002 correctly resolves to Gold.
+- **Impact:** Historical shipments would be assigned the wrong tier if a customer changed status mid-quarter.
+- **Fix:** Preserved effective-dated customer tier history in `staging.customer_tiers` and joined shipments to the most recent tier record on or before each shipment date. `CUST002` now resolves to Platinum before 2024-02-15 and Gold afterward.
 
 #### 7. INNER JOIN Drops Orphan Customers
 - **Severity:** High
@@ -78,29 +78,36 @@ The pipeline contained **13 distinct issues** spanning security vulnerabilities,
 - **Impact:** Lost revenue data — shipments for unknown customers disappear from analytics.
 - **Fix:** Changed to `LEFT JOIN` with `COALESCE(tier, 'Unknown')`. CUST999 now correctly appears as "Unknown" tier.
 
-### 🟡 Medium (4)
+### 🟡 Medium (5)
 
-#### 8. No API Retry Logic
+#### 8. No Raw Ingest Audit Trail for Source Data
+- **Severity:** Medium
+- **Category:** Observability
+- **Detail:** Original extraction loaded directly into staging, which made it difficult to inspect source payloads, compare accepted vs. rejected records, or explain row-count changes after validation.
+- **Impact:** Reduced traceability during debugging and weak evidence for why specific records were excluded from downstream analytics.
+- **Fix:** Added raw ingest ledgers: `raw.shipments_raw`, `raw.customer_tiers_raw`, `raw.shipment_rejections`, and `raw.customer_tier_rejections`. This preserves the original source rows and deterministic rejection metadata.
+
+#### 9. No API Retry Logic
 - **Severity:** Medium
 - **Category:** Resilience
 - **Detail:** The API returns HTTP 500 intermittently (deliberate flakiness on every ~7th request). Original code had no retry mechanism.
 - **Impact:** Pipeline fails non-deterministically on any run that hits the flaky request.
 - **Fix:** Added 3-attempt retry with 5-second delay between attempts. Raises `RuntimeError` only after all attempts exhausted.
 
-#### 9. Non-Idempotent Analytics Load
+#### 10. Non-Idempotent Analytics Load
 - **Severity:** Medium
 - **Category:** Data Integrity
 - **Detail:** `load_analytics.py` used `INSERT` without clearing existing data. Re-running the pipeline duplicated all analytics rows.
 - **Impact:** Analytics totals double on every re-run.
 - **Fix:** Added `TRUNCATE TABLE analytics.shipping_spend_by_tier` before `INSERT`. Verified idempotency via automated test.
 
-#### 10. Non-Atomic Table Swaps
+#### 11. Non-Atomic Table Swaps
 - **Severity:** Medium
 - **Category:** Reliability
 - **Detail:** All scripts used `DROP TABLE IF EXISTS; CREATE TABLE` — if the process crashes between DROP and data load, the table is empty.
 - **Fix:** Write to `_new` table, then `DROP` old + `ALTER TABLE ... RENAME`. The old table exists until the new one is fully loaded.
 
-#### 11. Hardcoded Database Credentials
+#### 12. Hardcoded Database Credentials
 - **Severity:** Medium
 - **Category:** Security
 - **Detail:** All scripts hardcoded `host="postgres"`, `database="airflow"`, etc. directly in source.
@@ -108,13 +115,13 @@ The pipeline contained **13 distinct issues** spanning security vulnerabilities,
 
 ### 🔵 Low (2)
 
-#### 12. PostgreSQL Port Conflict with Host
+#### 13. PostgreSQL Port Conflict with Host
 - **Severity:** Low
 - **Category:** Infrastructure
 - **Detail:** `docker-compose.yml` mapped postgres to host port `5432`, which conflicts with any existing PostgreSQL instance on the host.
 - **Fix:** Remapped to `5433:5432`.
 
-#### 13. API Artificial Latency (Every 7th Request)
+#### 14. API Artificial Latency (Every 7th Request)
 - **Severity:** Low (by design)
 - **Category:** Resilience testing
 - **Detail:** The mock API injects a 5-second sleep on every 7th request. This is a deliberate challenge feature, not a bug to fix in the API — but the pipeline must handle it.
@@ -127,11 +134,11 @@ The pipeline contained **13 distinct issues** spanning security vulnerabilities,
 
 | Category | Tests | Status |
 |----------|-------|--------|
-| Extraction | 8 tests (count, dedup, neg cost, null ID, cancelled, tier SCD) | ✅ All pass |
-| Transformation | 3 tests (row count, orphan mapping, tier coverage) | ✅ All pass |
+| Extraction | 12 tests (counts, dedup, validation, raw ledgers, tier history, rejection determinism) | ✅ All pass |
+| Transformation | 4 tests (row count, orphan mapping, effective-dated join, tier coverage) | ✅ All pass |
 | Analytics | 5 tests (data exists, row count, no negatives, spend match, no dupes) | ✅ All pass |
 | Idempotency | 1 test (TRUNCATE + INSERT stability) | ✅ All pass |
-| **Total** | **17 tests** | **✅ 17/17 pass (0.25s)** |
+| **Total** | **26 tests** | **✅ 26/26 pass** |
 
 ---
 
@@ -140,9 +147,10 @@ The pipeline contained **13 distinct issues** spanning security vulnerabilities,
 | File | Changes |
 |------|---------|
 | `docker-compose.yml` | Fixed YAML indent, port conflicts (API→8000, PG→5433), added tests volume |
-| `scripts/extract_shipments.py` | Parameterized SQL, retry logic, validation, dedup, atomic swap, env vars |
-| `scripts/extract_customer_tiers.py` | SCD handling, atomic swap, env vars |
-| `scripts/transform_data.py` | LEFT JOIN + COALESCE, atomic swap, source validation, env vars |
+| `sql/init.sql` | Base schema creation and analytics schema contract initialization |
+| `scripts/extract_shipments.py` | Parameterized SQL, retry logic, raw ingest ledger, validation, dedup, atomic swap, env vars |
+| `scripts/extract_customer_tiers.py` | Raw ingest ledger, rejection ledger, effective-dated history preservation, atomic swap, env vars |
+| `scripts/transform_data.py` | LEFT JOIN + COALESCE, effective-dated customer tier history join, atomic swap, source validation, env vars |
 | `scripts/load_analytics.py` | Idempotent TRUNCATE+INSERT, env vars, analytics summary output |
-| `tests/test_pipeline.py` | 17 automated tests across 4 categories |
+| `tests/test_pipeline.py` | 26 automated tests across 4 categories |
 | `tests/conftest.py` | Test configuration and DB connection helper |
