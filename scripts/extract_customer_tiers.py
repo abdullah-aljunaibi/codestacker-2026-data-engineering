@@ -123,6 +123,9 @@ def extract_customer_tiers_from_csv():
         rows = list(reader)
 
     print(f"Loaded {len(rows)} rows from CSV")
+    if not rows:
+        raise RuntimeError("Customer tier CSV is empty")
+
     validated_rows, rejected_rows = _validate_customer_tier_rows_with_reasons(rows)
 
     postgres_host = os.environ.get("POSTGRES_HOST")

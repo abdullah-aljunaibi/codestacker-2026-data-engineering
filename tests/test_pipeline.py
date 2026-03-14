@@ -180,6 +180,14 @@ class TestExtraction:
             for constraint_expression, columns in check_constraints
         ), f"Missing tier CHECK constraint: {check_constraints}"
 
+    def test_empty_customer_tier_csv_fails_hard(self, tmp_path, monkeypatch):
+        csv_path = tmp_path / "customer_tiers_empty.csv"
+        csv_path.write_text("customer_id,customer_name,tier,tier_updated_date\n", encoding="utf-8")
+        monkeypatch.setenv("TIERS_CSV_PATH", str(csv_path))
+
+        with pytest.raises(RuntimeError, match="Customer tier CSV is empty"):
+            extract_customer_tiers_from_csv()
+
     @pytest.mark.parametrize(
         ("csv_text", "error_message"),
         [
