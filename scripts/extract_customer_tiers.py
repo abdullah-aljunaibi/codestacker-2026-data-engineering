@@ -1,6 +1,6 @@
 """
 Extract customer tier data from CSV file.
-Fixes: SCD handling (latest tier per customer), atomic swap, validation, env credentials.
+Fixes: preserve customer tier history, atomic swap, validation, env credentials.
 """
 import csv
 import psycopg2
@@ -26,28 +26,18 @@ def extract_customer_tiers_from_csv():
 
     print(f"Loaded {len(rows)} rows from CSV")
 
-    # SCD: keep latest tier per customer_id (by tier_updated_date)
-    latest = {}
-    for row in rows:
-        cid = row["customer_id"]
-        if cid not in latest or row["tier_updated_date"] > latest[cid]["tier_updated_date"]:
-            latest[cid] = row
-
-    deduped = list(latest.values())
-    print(f"After dedup (latest tier per customer): {len(deduped)} customers")
-
     # Atomic table swap
     cursor.execute("DROP TABLE IF EXISTS staging.customer_tiers_new;")
     cursor.execute("""
         CREATE TABLE staging.customer_tiers_new (
-            customer_id VARCHAR(50) PRIMARY KEY,
+            customer_id VARCHAR(50) NOT NULL,
             customer_name VARCHAR(200),
             tier VARCHAR(50),
             tier_updated_date DATE
         );
     """)
 
-    for row in deduped:
+    for row in rows:
         cursor.execute(
             """INSERT INTO staging.customer_tiers_new 
                (customer_id, customer_name, tier, tier_updated_date)
@@ -60,7 +50,7 @@ def extract_customer_tiers_from_csv():
     cursor.execute("ALTER TABLE staging.customer_tiers_new RENAME TO customer_tiers;")
     conn.commit()
 
-    print(f"Loaded {len(deduped)} customer tiers into staging.customer_tiers")
+    print(f"Loaded {len(rows)} customer tier history rows into staging.customer_tiers")
     cursor.close()
     conn.close()
     print("Customer tier extraction completed")

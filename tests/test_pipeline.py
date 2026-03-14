@@ -57,26 +57,19 @@ class TestExtraction:
         assert cur.fetchone()[0] == 0, "Cancelled shipments in staging"
         cur.close(); conn.close()
 
-    def test_customer_tiers_deduped(self):
+    def test_customer_tier_history_preserved(self):
         conn = get_conn()
         cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM staging.customer_tiers;")
+        row_count = cur.fetchone()[0]
         cur.execute("""
-            SELECT customer_id, COUNT(*) FROM staging.customer_tiers 
-            GROUP BY customer_id HAVING COUNT(*) > 1;
+            SELECT COUNT(*) FROM staging.customer_tiers
+            WHERE customer_id = 'CUST002';
         """)
-        dupes = cur.fetchall()
+        cust002_count = cur.fetchone()[0]
         cur.close(); conn.close()
-        assert len(dupes) == 0, f"Duplicate customer tiers: {dupes}"
-
-    def test_cust002_latest_tier_is_gold(self):
-        """CUST002 has two CSV entries: Platinum (Jan) and Gold (Feb 15). Latest = Gold."""
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT tier FROM staging.customer_tiers WHERE customer_id = 'CUST002';")
-        row = cur.fetchone()
-        cur.close(); conn.close()
-        assert row is not None, "CUST002 not found"
-        assert row[0] == 'Gold', f"Expected Gold, got {row[0]}"
+        assert row_count == 7, f"Expected 7 customer tier history rows, got {row_count}"
+        assert cust002_count == 2, f"Expected 2 history rows for CUST002, got {cust002_count}"
 
 
 class TestTransformation:
@@ -102,6 +95,23 @@ class TestTransformation:
         assert row is not None, "CUST999 not found"
         assert row[0] == 'Unknown', f"Expected 'Unknown', got {row[0]}"
 
+    def test_effective_dated_tiers_for_cust002_shipments(self):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT shipment_id, tier
+            FROM staging.shipments_with_tiers
+            WHERE shipment_id IN ('SHP002', 'SHP006', 'SHP018')
+            ORDER BY shipment_id;
+        """)
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        assert rows == [
+            ('SHP002', 'Platinum'),
+            ('SHP006', 'Platinum'),
+            ('SHP018', 'Gold'),
+        ], f"Unexpected CUST002 shipment tiers: {rows}"
+
     def test_all_tiers_present(self):
         conn = get_conn()
         cur = conn.cursor()
@@ -125,8 +135,35 @@ class TestAnalytics:
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM analytics.shipping_spend_by_tier;")
-        assert cur.fetchone()[0] == 10, "Expected 10 analytics rows"
+        assert cur.fetchone()[0] == 11, "Expected 11 analytics rows"
         cur.close(); conn.close()
+
+    def test_monthly_totals_reflect_historical_tier_split(self):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT tier, year_month, total_shipping_spend, shipment_count
+            FROM analytics.shipping_spend_by_tier
+            ORDER BY year_month, tier;
+        """)
+        rows = [
+            (tier, year_month, float(total_shipping_spend), shipment_count)
+            for tier, year_month, total_shipping_spend, shipment_count in cur.fetchall()
+        ]
+        cur.close(); conn.close()
+        assert rows == [
+            ('Gold', '2024-01', 55.50, 2),
+            ('Platinum', '2024-01', 47.00, 1),
+            ('Silver', '2024-01', 15.75, 1),
+            ('Bronze', '2024-02', 20.00, 1),
+            ('Gold', '2024-02', 84.00, 3),
+            ('Platinum', '2024-02', 100.50, 2),
+            ('Silver', '2024-02', 42.00, 1),
+            ('Unknown', '2024-02', 18.50, 1),
+            ('Gold', '2024-03', 83.25, 3),
+            ('Platinum', '2024-03', 44.50, 1),
+            ('Silver', '2024-03', 38.00, 1),
+        ], f"Unexpected analytics rows: {rows}"
 
     def test_no_negative_spend(self):
         conn = get_conn()

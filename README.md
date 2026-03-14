@@ -67,7 +67,7 @@ docker-compose exec postgres psql -U airflow -d airflow -c \
   "SELECT * FROM analytics.shipping_spend_by_tier ORDER BY year_month, tier;"
 ```
 
-Expected output: 10 rows showing shipping spend per customer tier per month (Jan–Mar 2024).
+Expected output: 11 rows showing shipping spend per customer tier per month (Jan–Mar 2024), with customer tier changes applied historically by effective date.
 
 ### Run Tests
 
@@ -116,8 +116,8 @@ No credentials are hardcoded in any script.
 │   └── shipment_analytics_dag.py  # Airflow DAG orchestration
 ├── scripts/
 │   ├── extract_shipments.py       # Fixed: SQL injection, retry, validation, dedup
-│   ├── extract_customer_tiers.py  # Fixed: SCD handling, atomic swap
-│   ├── transform_data.py          # Fixed: LEFT JOIN, orphan handling
+│   ├── extract_customer_tiers.py  # Fixed: tier history preservation, atomic swap
+│   ├── transform_data.py          # Fixed: effective-dated LEFT JOIN, orphan handling
 │   └── load_analytics.py          # Fixed: idempotent TRUNCATE+INSERT
 ├── sql/
 │   └── init.sql                   # Database schema initialization
@@ -145,7 +145,7 @@ No credentials are hardcoded in any script.
                                                     ▲
 ┌──────────────┐    ┌───────────────────┐           │
 │  CSV file    │───▶│ extract_tiers     │───────────┘
-│              │    │ (SCD dedup)       │
+│              │    │ (tier history)    │
 └──────────────┘    └───────────────────┘
 ```
 
@@ -162,7 +162,7 @@ No credentials are hardcoded in any script.
 | 3 | 🔴 Critical | API + Airflow port 8080 conflict | API remapped to 8000 |
 | 4 | 🟠 High | Duplicate shipment SHP002 | Dedup by shipment_id |
 | 5 | 🟠 High | No data validation | Reject negatives, nulls, cancelled |
-| 6 | 🟠 High | Duplicate customer tier (SCD) | Keep latest tier_updated_date |
+| 6 | 🟠 High | Customer tier history lost | Preserve all tier rows and join by effective date |
 | 7 | 🟠 High | INNER JOIN drops orphans | LEFT JOIN + COALESCE → 'Unknown' |
 | 8 | 🟡 Medium | No API retry logic | 3 attempts, 5s delay |
 | 9 | 🟡 Medium | Non-idempotent load | TRUNCATE before INSERT |
@@ -177,13 +177,13 @@ Full details in [`ENGINEERING_AUDIT.md`](./ENGINEERING_AUDIT.md).
 
 ## Test Coverage
 
-17 tests across 4 categories — all passing in 0.25s:
+18 tests across 4 categories:
 
 | Category | Tests | What's Verified |
 |----------|-------|-----------------|
-| Extraction | 8 | Count, dedup, no negatives, no nulls, no cancelled, tier SCD |
-| Transformation | 3 | Row preservation, orphan→Unknown, all tiers present |
-| Analytics | 5 | Data exists, 10 rows, no negatives, totals match, no dupes |
+| Extraction | 7 | Count, dedup, no negatives, no nulls, no cancelled, tier history preserved |
+| Transformation | 4 | Row preservation, orphan→Unknown, effective-dated tiering, all tiers present |
+| Analytics | 6 | Data exists, 11 rows, corrected monthly totals, no negatives, totals match, no dupes |
 | Idempotency | 1 | TRUNCATE+INSERT produces identical results |
 
 ---

@@ -1,7 +1,7 @@
 """
 Transform: join shipments with customer tiers.
-Fixes: LEFT JOIN with COALESCE for orphan customers (mapped to 'Unknown'),
-       atomic table swap, source validation.
+Fixes: effective-dated LEFT JOIN with COALESCE for orphan customers
+       (mapped to 'Unknown'), atomic table swap, source validation.
 """
 import psycopg2
 import os
@@ -33,7 +33,19 @@ def transform_shipment_data():
     cursor.execute("DROP TABLE IF EXISTS staging.shipments_with_tiers_new;")
     cursor.execute("""
         CREATE TABLE staging.shipments_with_tiers_new AS
-        SELECT 
+        WITH tier_history AS (
+            SELECT
+                customer_id,
+                customer_name,
+                tier,
+                tier_updated_date AS effective_from,
+                LEAD(tier_updated_date) OVER (
+                    PARTITION BY customer_id
+                    ORDER BY tier_updated_date
+                ) AS effective_to
+            FROM staging.customer_tiers
+        )
+        SELECT
             s.shipment_id,
             s.customer_id,
             s.shipping_cost,
@@ -42,7 +54,10 @@ def transform_shipment_data():
             COALESCE(ct.customer_name, 'Unknown') AS customer_name,
             COALESCE(ct.tier, 'Unknown') AS tier
         FROM staging.shipments s
-        LEFT JOIN staging.customer_tiers ct ON s.customer_id = ct.customer_id;
+        LEFT JOIN tier_history ct
+            ON s.customer_id = ct.customer_id
+           AND s.shipment_date >= ct.effective_from
+           AND (s.shipment_date < ct.effective_to OR ct.effective_to IS NULL);
     """)
 
     # Check for orphans
