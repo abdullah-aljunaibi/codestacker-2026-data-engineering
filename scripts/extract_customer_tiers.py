@@ -125,12 +125,27 @@ def extract_customer_tiers_from_csv():
     print(f"Loaded {len(rows)} rows from CSV")
     validated_rows, rejected_rows = _validate_customer_tier_rows_with_reasons(rows)
 
-    conn = psycopg2.connect(
-        host=os.environ.get("POSTGRES_HOST", "postgres"),
-        database=os.environ.get("POSTGRES_DB", "airflow"),
-        user=os.environ.get("POSTGRES_USER", "airflow"),
-        password=os.environ.get("POSTGRES_PASSWORD", "airflow"),
-    )
+    db_config = {
+        "host": os.environ.get("POSTGRES_HOST", "postgres"),
+        "port": int(os.environ.get("POSTGRES_PORT", "5432")),
+        "database": os.environ.get("POSTGRES_DB", "airflow"),
+        "user": os.environ.get("POSTGRES_USER", "airflow"),
+        "password": os.environ.get("POSTGRES_PASSWORD", "airflow"),
+    }
+
+    try:
+        conn = psycopg2.connect(**db_config)
+    except psycopg2.OperationalError as exc:
+        if (
+            "POSTGRES_HOST" in os.environ
+            or "POSTGRES_PORT" in os.environ
+            or "could not translate host name" not in str(exc)
+        ):
+            raise
+
+        fallback_config = {**db_config, "host": "127.0.0.1", "port": 5433}
+        conn = psycopg2.connect(**fallback_config)
+
     cursor = conn.cursor()
 
     cursor.execute("CREATE SCHEMA IF NOT EXISTS raw;")
