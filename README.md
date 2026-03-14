@@ -107,18 +107,21 @@ No credentials are hardcoded in any script.
 
 ```
 .
-├── ENGINEERING_AUDIT.md           # Task 1: 13 issues found and fixed
-├── DESIGN_REFLECTION.md           # Task 5: Design decisions and scaling
-├── README.md                      # This file
-├── docker-compose.yml             # Fixed: YAML indent, port conflicts
+├── CHALLENGE_INSTRUCTIONS.md      # Original challenge brief
+├── DISTRIBUTION_GUIDE.md          # Submission and evaluator notes
+├── ENGINEERING_AUDIT.md           # Audit summary of identified issues and fixes
+├── DESIGN_REFLECTION.md           # Design decisions and scaling notes
+├── QUICK_START_EVALUATORS.md      # Fast-path setup for reviewers
+├── README.md                      # Project overview and runbook
+├── docker-compose.yml             # Local services and ports
 ├── Dockerfile
 ├── dags/
 │   └── shipment_analytics_dag.py  # Airflow DAG orchestration
 ├── scripts/
-│   ├── extract_shipments.py       # Fixed: SQL injection, retry, validation, dedup
-│   ├── extract_customer_tiers.py  # Fixed: tier history preservation, atomic swap
-│   ├── transform_data.py          # Fixed: effective-dated LEFT JOIN, orphan handling
-│   └── load_analytics.py          # Fixed: idempotent TRUNCATE+INSERT
+│   ├── extract_shipments.py       # API extract with validation, retry, and dedup
+│   ├── extract_customer_tiers.py  # CSV extract preserving customer tier history
+│   ├── transform_data.py          # Effective-dated shipment-to-tier transformation
+│   └── load_analytics.py          # Analytics load into monthly spend table
 ├── sql/
 │   └── init.sql                   # Database schema initialization
 ├── data/
@@ -128,8 +131,8 @@ No credentials are hardcoded in any script.
 │   └── Dockerfile
 └── tests/
     ├── conftest.py                # Test configuration and DB helper
-    ├── test_pipeline.py           # 17 tests across 4 categories
-    ├── test_sample.py             # Original sample test
+    ├── test_pipeline.py           # 23 pipeline tests across 4 categories
+    ├── test_sample.py             # Minimal smoke test
     └── requirements.txt           # Test dependencies
 ```
 
@@ -177,14 +180,16 @@ Full details in [`ENGINEERING_AUDIT.md`](./ENGINEERING_AUDIT.md).
 
 ## Test Coverage
 
-18 tests across 4 categories:
+`tests/test_pipeline.py` contains 23 pipeline tests across 4 categories:
 
 | Category | Tests | What's Verified |
 |----------|-------|-----------------|
-| Extraction | 7 | Count, dedup, no negatives, no nulls, no cancelled, tier history preserved |
+| Extraction | 12 | Shipment validation, tier history preservation, schema contract, deterministic rejection of invalid tier-history inputs |
 | Transformation | 4 | Row preservation, orphan→Unknown, effective-dated tiering, all tiers present |
 | Analytics | 6 | Data exists, 11 rows, corrected monthly totals, no negatives, totals match, no dupes |
 | Idempotency | 1 | TRUNCATE+INSERT produces identical results |
+
+`tests/test_sample.py` remains as a separate lightweight smoke test.
 
 ---
 

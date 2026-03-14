@@ -123,7 +123,7 @@ class TestExtraction:
             'tier': 'NO',
             'tier_updated_date': 'NO',
         }, f"Unexpected nullability contract: {columns}"
-        assert ['customer_id', 'tier_updated_date'] in unique_constraints, (
+        assert (['customer_id', 'tier_updated_date'],) in unique_constraints, (
             f"Missing UNIQUE(customer_id, tier_updated_date): {unique_constraints}"
         )
         assert any(
