@@ -125,9 +125,13 @@ def extract_customer_tiers_from_csv():
     print(f"Loaded {len(rows)} rows from CSV")
     validated_rows, rejected_rows = _validate_customer_tier_rows_with_reasons(rows)
 
+    postgres_host = os.environ.get("POSTGRES_HOST")
+    default_host = postgres_host or "postgres"
+    default_port = "5433" if default_host in {"127.0.0.1", "localhost"} else "5432"
+
     db_config = {
-        "host": os.environ.get("POSTGRES_HOST", "postgres"),
-        "port": int(os.environ.get("POSTGRES_PORT", "5432")),
+        "host": default_host,
+        "port": int(os.environ.get("POSTGRES_PORT", default_port)),
         "database": os.environ.get("POSTGRES_DB", "airflow"),
         "user": os.environ.get("POSTGRES_USER", "airflow"),
         "password": os.environ.get("POSTGRES_PASSWORD", "airflow"),
