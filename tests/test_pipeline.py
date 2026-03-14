@@ -13,6 +13,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from extract_customer_tiers import extract_customer_tiers_from_csv
 
 
+def _expected_rejection_details(error_message):
+    if error_message == "Duplicate same-day history rows for customer_id 'CUST001' on 2024-01-01":
+        return 3, "DUPLICATE_HISTORY_KEY"
+    if error_message == "Row 2: missing tier_updated_date":
+        return 2, "MISSING_TIER_UPDATED_DATE"
+    if error_message == "Row 2: missing customer_id":
+        return 2, "MISSING_CUSTOMER_ID"
+    if error_message == "Row 2: invalid tier value 'Diamond'":
+        return 2, "INVALID_TIER"
+    raise AssertionError(f"Unhandled error message: {error_message}")
+
+
 class TestExtraction:
     """Test data extraction stage."""
 
@@ -22,6 +34,36 @@ class TestExtraction:
         cur.execute("SELECT COUNT(*) FROM staging.shipments;")
         assert cur.fetchone()[0] > 0, "No shipments extracted"
         cur.close(); conn.close()
+
+    def test_raw_shipment_count(self):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM raw.shipments_raw;")
+        assert cur.fetchone()[0] == 21, "Expected 21 raw shipment rows"
+        cur.close(); conn.close()
+
+    def test_raw_customer_tier_count(self):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM raw.customer_tiers_raw;")
+        assert cur.fetchone()[0] == 7, "Expected 7 raw customer tier rows"
+        cur.close(); conn.close()
+
+    def test_shipment_rejection_reasons_are_deterministic(self):
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT shipment_id, rejection_reason_code
+            FROM raw.shipment_rejections
+            ORDER BY load_order;
+        """)
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        assert rows == [
+            ('SHP012', 'NEGATIVE_SHIPPING_COST'),
+            ('SHP014', 'MISSING_CUSTOMER_ID'),
+            ('SHP017', 'CANCELLED_SHIPMENT'),
+        ], f"Unexpected shipment rejection ledger rows: {rows}"
 
     def test_expected_shipment_count(self):
         """21 raw - 1 dupe (SHP002) - 1 neg cost - 1 null cust - 1 cancelled = 17."""
@@ -184,9 +226,17 @@ class TestExtraction:
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM staging.customer_tiers;")
         after_count = cur.fetchone()[0]
+        cur.execute("""
+            SELECT source_row_number, rejection_reason_code, error_message
+            FROM raw.customer_tier_rejections
+            ORDER BY source_row_number;
+        """)
+        rejection_rows = cur.fetchall()
         cur.close(); conn.close()
 
+        expected_row_number, expected_reason_code = _expected_rejection_details(error_message)
         assert after_count == before_count == 7
+        assert rejection_rows == [(expected_row_number, expected_reason_code, error_message)]
 
 
 class TestTransformation:

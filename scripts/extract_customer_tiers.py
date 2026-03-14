@@ -49,6 +49,70 @@ def _validate_customer_tier_rows(rows):
         seen_history_keys.add(history_key)
 
 
+def _validate_customer_tier_rows_with_reasons(rows):
+    seen_history_keys = set()
+    validated_rows = []
+    rejected_rows = []
+
+    for index, row in enumerate(rows, start=2):
+        customer_id = (row.get("customer_id") or "").strip()
+        tier = (row.get("tier") or "").strip()
+        tier_updated_date_raw = (row.get("tier_updated_date") or "").strip()
+
+        rejection_reason_code = None
+        error_message = None
+
+        if not customer_id:
+            rejection_reason_code = "MISSING_CUSTOMER_ID"
+            error_message = f"Row {index}: missing customer_id"
+        elif not tier:
+            rejection_reason_code = "INVALID_TIER"
+            error_message = "Row {index}: invalid tier value ''".format(index=index)
+        elif tier not in ALLOWED_TIERS:
+            rejection_reason_code = "INVALID_TIER"
+            error_message = f"Row {index}: invalid tier value '{tier}'"
+        elif not tier_updated_date_raw:
+            rejection_reason_code = "MISSING_TIER_UPDATED_DATE"
+            error_message = f"Row {index}: missing tier_updated_date"
+        else:
+            try:
+                tier_updated_date = date.fromisoformat(tier_updated_date_raw)
+            except ValueError:
+                rejection_reason_code = "INVALID_TIER_UPDATED_DATE"
+                error_message = (
+                    f"Row {index}: invalid tier_updated_date '{tier_updated_date_raw}'"
+                )
+            else:
+                history_key = (customer_id, tier_updated_date)
+                if history_key in seen_history_keys:
+                    rejection_reason_code = "DUPLICATE_HISTORY_KEY"
+                    error_message = (
+                        "Duplicate same-day history rows for "
+                        f"customer_id '{customer_id}' on {tier_updated_date.isoformat()}"
+                    )
+                else:
+                    seen_history_keys.add(history_key)
+
+        normalized_row = {
+            "source_row_number": index,
+            "customer_id": customer_id,
+            "customer_name": (row.get("customer_name") or "").strip(),
+            "tier": tier,
+            "tier_updated_date": tier_updated_date_raw,
+        }
+
+        if rejection_reason_code is None:
+            validated_rows.append(normalized_row)
+        else:
+            rejected_rows.append({
+                **normalized_row,
+                "rejection_reason_code": rejection_reason_code,
+                "error_message": error_message,
+            })
+
+    return validated_rows, rejected_rows
+
+
 def extract_customer_tiers_from_csv():
     print("Starting customer tier extraction...")
 
@@ -59,7 +123,7 @@ def extract_customer_tiers_from_csv():
         rows = list(reader)
 
     print(f"Loaded {len(rows)} rows from CSV")
-    _validate_customer_tier_rows(rows)
+    validated_rows, rejected_rows = _validate_customer_tier_rows_with_reasons(rows)
 
     conn = psycopg2.connect(
         host=os.environ.get("POSTGRES_HOST", "postgres"),
@@ -68,6 +132,72 @@ def extract_customer_tiers_from_csv():
         password=os.environ.get("POSTGRES_PASSWORD", "airflow"),
     )
     cursor = conn.cursor()
+
+    cursor.execute("CREATE SCHEMA IF NOT EXISTS raw;")
+    cursor.execute("DROP TABLE IF EXISTS raw.customer_tiers_raw;")
+    cursor.execute("""
+        CREATE TABLE raw.customer_tiers_raw (
+            source_row_number INTEGER NOT NULL,
+            customer_id VARCHAR(50),
+            customer_name VARCHAR(200),
+            tier VARCHAR(50),
+            tier_updated_date VARCHAR(50),
+            loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    cursor.execute("DROP TABLE IF EXISTS raw.customer_tier_rejections;")
+    cursor.execute("""
+        CREATE TABLE raw.customer_tier_rejections (
+            source_row_number INTEGER NOT NULL,
+            customer_id VARCHAR(50),
+            customer_name VARCHAR(200),
+            tier VARCHAR(50),
+            tier_updated_date VARCHAR(50),
+            rejection_reason_code VARCHAR(100) NOT NULL,
+            error_message TEXT NOT NULL,
+            loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+
+    for source_row_number, row in enumerate(rows, start=2):
+        cursor.execute(
+            """INSERT INTO raw.customer_tiers_raw
+               (source_row_number, customer_id, customer_name, tier, tier_updated_date)
+               VALUES (%s, %s, %s, %s, %s);""",
+            (
+                source_row_number,
+                (row.get("customer_id") or "").strip() or None,
+                (row.get("customer_name") or "").strip() or None,
+                (row.get("tier") or "").strip() or None,
+                (row.get("tier_updated_date") or "").strip() or None,
+            ),
+        )
+
+    for row in rejected_rows:
+        cursor.execute(
+            """INSERT INTO raw.customer_tier_rejections
+               (source_row_number, customer_id, customer_name, tier, tier_updated_date,
+                rejection_reason_code, error_message)
+               VALUES (%s, %s, %s, %s, %s, %s, %s);""",
+            (
+                row["source_row_number"],
+                row["customer_id"] or None,
+                row["customer_name"] or None,
+                row["tier"] or None,
+                row["tier_updated_date"] or None,
+                row["rejection_reason_code"],
+                row["error_message"],
+            ),
+        )
+
+    print(f"Persisted {len(rows)} rows into raw.customer_tiers_raw")
+    print(f"Rejected {len(rejected_rows)} customer tier rows into raw.customer_tier_rejections")
+
+    if rejected_rows:
+        conn.commit()
+        cursor.close()
+        conn.close()
+        raise ValueError(rejected_rows[0]["error_message"])
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS staging.customer_tiers (
@@ -82,19 +212,25 @@ def extract_customer_tiers_from_csv():
         );
     """)
     cursor.execute("TRUNCATE TABLE staging.customer_tiers;")
-
-    for row in rows:
-        cursor.execute(
-            """INSERT INTO staging.customer_tiers
-               (customer_id, customer_name, tier, tier_updated_date)
-               VALUES (%s, %s, %s, %s);""",
-            (row["customer_id"], row["customer_name"],
-             row["tier"], row["tier_updated_date"]),
+    cursor.execute("""
+        INSERT INTO staging.customer_tiers
+            (customer_id, customer_name, tier, tier_updated_date)
+        SELECT
+            customer_id,
+            customer_name,
+            tier,
+            tier_updated_date::DATE
+        FROM raw.customer_tiers_raw
+        WHERE source_row_number NOT IN (
+            SELECT source_row_number
+            FROM raw.customer_tier_rejections
         )
+        ORDER BY source_row_number;
+    """)
 
     conn.commit()
 
-    print(f"Loaded {len(rows)} customer tier history rows into staging.customer_tiers")
+    print(f"Loaded {len(validated_rows)} customer tier history rows into staging.customer_tiers")
     cursor.close()
     conn.close()
     print("Customer tier extraction completed")

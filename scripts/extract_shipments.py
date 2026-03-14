@@ -8,6 +8,11 @@ import os
 import time
 
 
+REJECTION_NEGATIVE_COST = "NEGATIVE_SHIPPING_COST"
+REJECTION_MISSING_CUSTOMER_ID = "MISSING_CUSTOMER_ID"
+REJECTION_CANCELLED = "CANCELLED_SHIPMENT"
+
+
 def extract_shipments_from_api():
     print("Starting shipment data extraction...")
 
@@ -41,36 +46,117 @@ def extract_shipments_from_api():
 
     print(f"Fetched {len(shipments)} raw shipments from API")
 
-    # Validate and filter
-    valid = []
-    rejected = 0
-    for s in shipments:
-        sid = s.get("shipment_id", "???")
-        cost = s.get("shipping_cost")
-        cid = s.get("customer_id")
-        status = s.get("status", "")
+    cursor.execute("CREATE SCHEMA IF NOT EXISTS raw;")
+    cursor.execute("DROP TABLE IF EXISTS raw.shipments_raw;")
+    cursor.execute("""
+        CREATE TABLE raw.shipments_raw (
+            load_order INTEGER NOT NULL,
+            shipment_id VARCHAR(50) NOT NULL,
+            customer_id VARCHAR(50),
+            shipping_cost DECIMAL(10,2),
+            shipment_date DATE NOT NULL,
+            status VARCHAR(50),
+            loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    cursor.execute("DROP TABLE IF EXISTS raw.shipment_rejections;")
+    cursor.execute("""
+        CREATE TABLE raw.shipment_rejections (
+            load_order INTEGER NOT NULL,
+            shipment_id VARCHAR(50) NOT NULL,
+            customer_id VARCHAR(50),
+            shipping_cost DECIMAL(10,2),
+            shipment_date DATE NOT NULL,
+            status VARCHAR(50),
+            rejection_reason_code VARCHAR(100) NOT NULL,
+            loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
 
-        if cost is not None and float(cost) < 0:
-            print(f"  REJECTED: {sid}: negative shipping_cost ({cost})")
-            rejected += 1
-            continue
-        if not cid:
-            print(f"  REJECTED: {sid}: missing customer_id")
-            rejected += 1
-            continue
-        if status and status.lower() == "cancelled":
-            print(f"  REJECTED: {sid}: cancelled shipment excluded")
-            rejected += 1
-            continue
-        valid.append(s)
+    for load_order, shipment in enumerate(shipments, start=1):
+        cursor.execute(
+            """INSERT INTO raw.shipments_raw
+               (load_order, shipment_id, customer_id, shipping_cost, shipment_date, status)
+               VALUES (%s, %s, %s, %s, %s, %s);""",
+            (
+                load_order,
+                shipment["shipment_id"],
+                shipment.get("customer_id"),
+                shipment.get("shipping_cost"),
+                shipment["shipment_date"],
+                shipment.get("status"),
+            ),
+        )
 
-    print(f"Valid: {len(valid)}, Rejected: {rejected}")
+    print(f"Persisted {len(shipments)} rows into raw.shipments_raw")
+
+    cursor.execute("""
+        INSERT INTO raw.shipment_rejections
+            (load_order, shipment_id, customer_id, shipping_cost, shipment_date, status, rejection_reason_code)
+        SELECT
+            load_order,
+            shipment_id,
+            customer_id,
+            shipping_cost,
+            shipment_date,
+            status,
+            CASE
+                WHEN shipping_cost < 0 THEN %s
+                WHEN customer_id IS NULL OR customer_id = '' THEN %s
+                WHEN LOWER(COALESCE(status, '')) = 'cancelled' THEN %s
+            END AS rejection_reason_code
+        FROM raw.shipments_raw
+        WHERE shipping_cost < 0
+           OR customer_id IS NULL
+           OR customer_id = ''
+           OR LOWER(COALESCE(status, '')) = 'cancelled';
+    """, (
+        REJECTION_NEGATIVE_COST,
+        REJECTION_MISSING_CUSTOMER_ID,
+        REJECTION_CANCELLED,
+    ))
+
+    cursor.execute("SELECT COUNT(*) FROM raw.shipment_rejections;")
+    rejected = cursor.fetchone()[0]
+    print(f"Valid: {len(shipments) - rejected}, Rejected: {rejected}")
+
+    cursor.execute("""
+        SELECT shipment_id, rejection_reason_code, shipping_cost, customer_id, status
+        FROM raw.shipment_rejections
+        ORDER BY load_order;
+    """)
+    for shipment_id, reason_code, shipping_cost, customer_id, status in cursor.fetchall():
+        if reason_code == REJECTION_NEGATIVE_COST:
+            print(f"  REJECTED: {shipment_id}: negative shipping_cost ({shipping_cost})")
+        elif reason_code == REJECTION_MISSING_CUSTOMER_ID:
+            print(f"  REJECTED: {shipment_id}: missing customer_id")
+        elif reason_code == REJECTION_CANCELLED:
+            print(f"  REJECTED: {shipment_id}: cancelled shipment excluded")
 
     # Deduplicate by shipment_id (keep last occurrence)
-    seen = {}
-    for s in valid:
-        seen[s["shipment_id"]] = s
-    deduped = list(seen.values())
+    cursor.execute("""
+        SELECT shipment_id, customer_id, shipping_cost, shipment_date, status
+        FROM (
+            SELECT
+                shipment_id,
+                customer_id,
+                shipping_cost,
+                shipment_date,
+                status,
+                ROW_NUMBER() OVER (
+                    PARTITION BY shipment_id
+                    ORDER BY load_order DESC
+                ) AS row_num
+            FROM raw.shipments_raw
+            WHERE (shipping_cost IS NULL OR shipping_cost >= 0)
+              AND customer_id IS NOT NULL
+              AND customer_id <> ''
+              AND LOWER(COALESCE(status, '')) <> 'cancelled'
+        ) ranked
+        WHERE row_num = 1
+        ORDER BY shipment_id;
+    """)
+    deduped = cursor.fetchall()
     print(f"After deduplication: {len(deduped)} unique shipments")
 
     # Atomic table swap
@@ -86,13 +172,12 @@ def extract_shipments_from_api():
         );
     """)
 
-    for s in deduped:
+    for shipment_id, customer_id, shipping_cost, shipment_date, status in deduped:
         cursor.execute(
             """INSERT INTO staging.shipments_new 
                (shipment_id, customer_id, shipping_cost, shipment_date, status)
                VALUES (%s, %s, %s, %s, %s);""",
-            (s["shipment_id"], s["customer_id"], s["shipping_cost"],
-             s["shipment_date"], s.get("status")),
+            (shipment_id, customer_id, shipping_cost, shipment_date, status),
         )
 
     cursor.execute("DROP TABLE IF EXISTS staging.shipments;")
