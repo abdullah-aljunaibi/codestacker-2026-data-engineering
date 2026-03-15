@@ -27,21 +27,23 @@ def load_analytics_data(pipeline_run_id=None):
             if source_count == 0:
                 raise RuntimeError("No data in shipments_with_tiers — cannot load analytics")
 
-            # Ensure analytics table exists
+            cursor.execute("CREATE SCHEMA IF NOT EXISTS analytics;")
+            cursor.execute("DROP TABLE IF EXISTS analytics.shipping_spend_by_tier_new;")
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS analytics.shipping_spend_by_tier (
-                    tier VARCHAR(50),
-                    year_month VARCHAR(7),
-                    total_shipping_spend DECIMAL(12,2),
-                    shipment_count INTEGER,
+                CREATE TABLE analytics.shipping_spend_by_tier_new (
+                    tier VARCHAR(50) NOT NULL,
+                    year_month VARCHAR(7) NOT NULL,
+                    total_shipping_spend DECIMAL(12,2) NOT NULL
+                        CHECK (total_shipping_spend >= 0),
+                    shipment_count INTEGER NOT NULL
+                        CHECK (shipment_count > 0),
                     calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        NOT NULL,
+                    PRIMARY KEY (tier, year_month)
                 );
             """)
-
-            # Idempotent: truncate then insert
-            cursor.execute("TRUNCATE TABLE analytics.shipping_spend_by_tier;")
             cursor.execute("""
-                INSERT INTO analytics.shipping_spend_by_tier
+                INSERT INTO analytics.shipping_spend_by_tier_new
                     (tier, year_month, total_shipping_spend, shipment_count, calculated_at)
                 SELECT
                     tier,
@@ -54,8 +56,18 @@ def load_analytics_data(pipeline_run_id=None):
                 ORDER BY year_month, tier;
             """)
 
-            cursor.execute("SELECT COUNT(*) FROM analytics.shipping_spend_by_tier;")
+            cursor.execute("SELECT COUNT(*) FROM analytics.shipping_spend_by_tier_new;")
             row_count = cursor.fetchone()[0]
+            if row_count == 0:
+                metrics["rows_read"] = source_count
+                metrics["rows_written"] = 0
+                metrics["rows_rejected"] = 0
+                raise RuntimeError("No analytics rows generated — aborting load")
+
+            cursor.execute("DROP TABLE IF EXISTS analytics.shipping_spend_by_tier;")
+            cursor.execute(
+                "ALTER TABLE analytics.shipping_spend_by_tier_new RENAME TO shipping_spend_by_tier;"
+            )
             logger.info("Inserted %s rows into analytics.shipping_spend_by_tier", row_count)
 
             metrics["rows_read"] = source_count
@@ -81,3 +93,4 @@ def load_analytics_data(pipeline_run_id=None):
     cursor.close()
     conn.close()
     logger.info("Analytics data load completed")
+    return pipeline_run_id

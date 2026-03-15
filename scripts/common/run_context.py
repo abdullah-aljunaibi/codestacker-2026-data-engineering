@@ -10,26 +10,43 @@ from common.db import get_connection
 
 
 PIPELINE_NAME = "shipment_analytics_pipeline"
+_ACTIVE_PIPELINE_RUN_ID = None
 
 
 def generate_run_id() -> str:
     return str(uuid.uuid4())
 
 
+def _set_active_pipeline_run_id(pipeline_run_id):
+    global _ACTIVE_PIPELINE_RUN_ID
+    _ACTIVE_PIPELINE_RUN_ID = pipeline_run_id
+    return pipeline_run_id
+
+
+def clear_pipeline_run_id():
+    global _ACTIVE_PIPELINE_RUN_ID
+    _ACTIVE_PIPELINE_RUN_ID = None
+
+
 def get_pipeline_run_id(pipeline_run_id=None) -> str:
     if pipeline_run_id:
-        return pipeline_run_id
+        return _set_active_pipeline_run_id(pipeline_run_id)
 
     env_run_id = os.environ.get("PIPELINE_RUN_ID")
     if env_run_id:
-        return env_run_id
+        return _set_active_pipeline_run_id(env_run_id)
 
     airflow_dag_id = os.environ.get("AIRFLOW_CTX_DAG_ID")
     airflow_run_id = os.environ.get("AIRFLOW_CTX_DAG_RUN_ID")
     if airflow_dag_id and airflow_run_id:
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{airflow_dag_id}:{airflow_run_id}"))
+        return _set_active_pipeline_run_id(
+            str(uuid.uuid5(uuid.NAMESPACE_URL, f"{airflow_dag_id}:{airflow_run_id}"))
+        )
 
-    return generate_run_id()
+    if _ACTIVE_PIPELINE_RUN_ID:
+        return _ACTIVE_PIPELINE_RUN_ID
+
+    return _set_active_pipeline_run_id(generate_run_id())
 
 
 def ensure_ops_schema(cursor):
@@ -119,7 +136,11 @@ def complete_pipeline_run(pipeline_run_id, status, error_message=None):
             (status, error_message, pipeline_run_id),
         )
 
-    _run_ops_write(_callback)
+    try:
+        _run_ops_write(_callback)
+    finally:
+        if _ACTIVE_PIPELINE_RUN_ID == pipeline_run_id:
+            clear_pipeline_run_id()
 
 
 @contextmanager

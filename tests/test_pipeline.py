@@ -39,18 +39,22 @@ class TestExtraction:
         cur.close(); conn.close()
 
     def test_raw_shipment_count(self):
+        """Raw tables are append-only; check the latest pipeline run has 21 rows."""
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM raw.shipments_raw;")
-        assert cur.fetchone()[0] == 21, "Expected 21 raw shipment rows"
+        cur.execute("SELECT COUNT(*) FROM raw.shipments_raw WHERE pipeline_run_id = (SELECT pipeline_run_id FROM raw.shipments_raw ORDER BY loaded_at DESC LIMIT 1);")
+        count = cur.fetchone()[0]
         cur.close(); conn.close()
+        assert count == 21, f"Expected 21 raw shipment rows in latest run, got {count}"
 
     def test_raw_customer_tier_count(self):
+        """Raw tables are append-only; check the latest pipeline run has 7 rows."""
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM raw.customer_tiers_raw;")
-        assert cur.fetchone()[0] == 7, "Expected 7 raw customer tier rows"
+        cur.execute("SELECT COUNT(*) FROM raw.customer_tiers_raw WHERE pipeline_run_id = (SELECT pipeline_run_id FROM raw.customer_tiers_raw ORDER BY loaded_at DESC LIMIT 1);")
+        count = cur.fetchone()[0]
         cur.close(); conn.close()
+        assert count == 7, f"Expected 7 raw customer tier rows in latest run, got {count}"
 
     def test_shipment_rejection_reasons_are_deterministic(self):
         conn = get_conn()
@@ -58,6 +62,7 @@ class TestExtraction:
         cur.execute("""
             SELECT shipment_id, rejection_reason_code
             FROM raw.shipment_rejections
+            WHERE pipeline_run_id = (SELECT pipeline_run_id FROM raw.shipment_rejections ORDER BY load_order DESC LIMIT 1)
             ORDER BY load_order;
         """)
         rows = cur.fetchall()

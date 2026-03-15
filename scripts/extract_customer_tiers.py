@@ -213,22 +213,21 @@ def extract_customer_tiers_from_csv(pipeline_run_id=None):
                 metrics["rows_rejected"] = len(rejected_rows)
                 raise ValueError(rejected_rows[0]["error_message"])
 
+            cursor.execute("CREATE SCHEMA IF NOT EXISTS staging;")
+            cursor.execute("DROP TABLE IF EXISTS staging.customer_tiers_new;")
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS staging.customer_tiers (
+                CREATE TABLE staging.customer_tiers_new (
                     customer_id VARCHAR(50) NOT NULL,
                     customer_name VARCHAR(200),
                     tier VARCHAR(50) NOT NULL,
                     tier_updated_date DATE NOT NULL,
-                    CONSTRAINT customer_tiers_customer_id_tier_updated_date_key
-                        UNIQUE (customer_id, tier_updated_date),
-                    CONSTRAINT customer_tiers_tier_check
-                        CHECK (tier IN ('Bronze', 'Silver', 'Gold', 'Platinum'))
+                    UNIQUE (customer_id, tier_updated_date),
+                    CHECK (tier IN ('Bronze', 'Silver', 'Gold', 'Platinum'))
                 );
             """)
-            cursor.execute("TRUNCATE TABLE staging.customer_tiers;")
             cursor.execute(
                 """
-                INSERT INTO staging.customer_tiers
+                INSERT INTO staging.customer_tiers_new
                     (customer_id, customer_name, tier, tier_updated_date)
                 SELECT
                     customer_id,
@@ -246,12 +245,24 @@ def extract_customer_tiers_from_csv(pipeline_run_id=None):
                 """,
                 (pipeline_run_id, pipeline_run_id),
             )
+            cursor.execute("SELECT COUNT(*) FROM staging.customer_tiers_new;")
+            staged_row_count = cursor.fetchone()[0]
+
+            if staged_row_count == 0:
+                metrics["rows_read"] = len(rows)
+                metrics["rows_written"] = 0
+                metrics["rows_rejected"] = len(rejected_rows)
+                raise RuntimeError("No customer tiers found in staging — aborting extract")
+
+            cursor.execute("DROP TABLE IF EXISTS staging.customer_tiers;")
+            cursor.execute("ALTER TABLE staging.customer_tiers_new RENAME TO customer_tiers;")
 
             metrics["rows_read"] = len(rows)
-            metrics["rows_written"] = len(validated_rows)
+            metrics["rows_written"] = staged_row_count
             metrics["rows_rejected"] = len(rejected_rows)
 
-    logger.info("Loaded %s customer tier history rows into staging.customer_tiers", len(validated_rows))
+    logger.info("Loaded %s customer tier history rows into staging.customer_tiers", staged_row_count)
     cursor.close()
     conn.close()
     logger.info("Customer tier extraction completed")
+    return pipeline_run_id

@@ -30,6 +30,8 @@ def transform_shipment_data(pipeline_run_id=None):
 
             if ship_count == 0:
                 raise RuntimeError("No shipments in staging — cannot transform")
+            if tier_count == 0:
+                raise RuntimeError("No customer tiers found in staging — aborting transform")
 
             # Atomic table swap with LEFT JOIN
             cursor.execute("DROP TABLE IF EXISTS staging.shipments_with_tiers_new;")
@@ -87,3 +89,4 @@ def transform_shipment_data(pipeline_run_id=None):
     cursor.close()
     conn.close()
     logger.info("Data transformation completed")
+    return pipeline_run_id

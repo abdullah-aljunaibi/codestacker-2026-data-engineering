@@ -237,6 +237,12 @@ def extract_shipments_from_api(pipeline_run_id=None):
             deduped = cursor.fetchall()
             logger.info("After deduplication: %s unique shipments", len(deduped))
 
+            if not deduped:
+                metrics["rows_read"] = len(shipments)
+                metrics["rows_written"] = 0
+                metrics["rows_rejected"] = rejected
+                raise RuntimeError("No valid shipments remain after validation — aborting extract")
+
             # Atomic table swap
             cursor.execute("DROP TABLE IF EXISTS staging.shipments_new;")
             cursor.execute("""
@@ -269,3 +275,4 @@ def extract_shipments_from_api(pipeline_run_id=None):
     cursor.close()
     conn.close()
     logger.info("Shipment data extraction completed")
+    return pipeline_run_id
