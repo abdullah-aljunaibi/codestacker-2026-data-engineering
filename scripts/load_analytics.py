@@ -2,94 +2,82 @@
 Load analytics: aggregate shipping spend per tier per month.
 Fixes: idempotent via TRUNCATE before INSERT, env credentials, summary output.
 """
-import psycopg2
-import os
+from common.db import get_connection, transaction
+from common.logging_utils import get_logger
+from common.run_context import complete_pipeline_run, get_pipeline_run_id, stage_run
 
 
-def load_analytics_data():
-    print("Starting analytics data load...")
+logger = get_logger(__name__)
 
-    postgres_host = os.environ.get("POSTGRES_HOST")
-    default_host = postgres_host or "postgres"
-    default_port = "5433" if default_host in {"127.0.0.1", "localhost"} else "5432"
 
-    db_config = {
-        "host": default_host,
-        "port": int(os.environ.get("POSTGRES_PORT", default_port)),
-        "database": os.environ.get("POSTGRES_DB", "airflow"),
-        "user": os.environ.get("POSTGRES_USER", "airflow"),
-        "password": os.environ.get("POSTGRES_PASSWORD", "airflow"),
-    }
+def load_analytics_data(pipeline_run_id=None):
+    pipeline_run_id = get_pipeline_run_id(pipeline_run_id)
+    logger.info("Starting analytics data load for pipeline_run_id=%s", pipeline_run_id)
 
-    try:
-        conn = psycopg2.connect(**db_config)
-    except psycopg2.OperationalError as exc:
-        if (
-            "POSTGRES_HOST" in os.environ
-            or "POSTGRES_PORT" in os.environ
-            or "could not translate host name" not in str(exc)
-        ):
-            raise
-
-        fallback_config = {**db_config, "host": "127.0.0.1", "port": 5433}
-        conn = psycopg2.connect(**fallback_config)
+    conn = get_connection()
     cursor = conn.cursor()
 
-    # Validate source
-    cursor.execute("SELECT COUNT(*) FROM staging.shipments_with_tiers;")
-    source_count = cursor.fetchone()[0]
-    print(f"  Source: {source_count} rows in shipments_with_tiers")
+    with transaction(conn):
+        with stage_run(pipeline_run_id, "load_analytics") as metrics:
+            # Validate source
+            cursor.execute("SELECT COUNT(*) FROM staging.shipments_with_tiers;")
+            source_count = cursor.fetchone()[0]
+            logger.info("Source: %s rows in shipments_with_tiers", source_count)
 
-    if source_count == 0:
-        raise RuntimeError("No data in shipments_with_tiers — cannot load analytics")
+            if source_count == 0:
+                raise RuntimeError("No data in shipments_with_tiers — cannot load analytics")
 
-    # Ensure analytics table exists
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS analytics.shipping_spend_by_tier (
-            tier VARCHAR(50),
-            year_month VARCHAR(7),
-            total_shipping_spend DECIMAL(12,2),
-            shipment_count INTEGER,
-            calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
+            # Ensure analytics table exists
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS analytics.shipping_spend_by_tier (
+                    tier VARCHAR(50),
+                    year_month VARCHAR(7),
+                    total_shipping_spend DECIMAL(12,2),
+                    shipment_count INTEGER,
+                    calculated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-    # Idempotent: truncate then insert
-    cursor.execute("TRUNCATE TABLE analytics.shipping_spend_by_tier;")
-    cursor.execute("""
-        INSERT INTO analytics.shipping_spend_by_tier 
-            (tier, year_month, total_shipping_spend, shipment_count, calculated_at)
-        SELECT 
-            tier,
-            TO_CHAR(shipment_date, 'YYYY-MM') AS year_month,
-            SUM(shipping_cost) AS total_shipping_spend,
-            COUNT(*) AS shipment_count,
-            NOW() AS calculated_at
-        FROM staging.shipments_with_tiers
-        GROUP BY tier, TO_CHAR(shipment_date, 'YYYY-MM')
-        ORDER BY year_month, tier;
-    """)
+            # Idempotent: truncate then insert
+            cursor.execute("TRUNCATE TABLE analytics.shipping_spend_by_tier;")
+            cursor.execute("""
+                INSERT INTO analytics.shipping_spend_by_tier
+                    (tier, year_month, total_shipping_spend, shipment_count, calculated_at)
+                SELECT
+                    tier,
+                    TO_CHAR(shipment_date, 'YYYY-MM') AS year_month,
+                    SUM(shipping_cost) AS total_shipping_spend,
+                    COUNT(*) AS shipment_count,
+                    NOW() AS calculated_at
+                FROM staging.shipments_with_tiers
+                GROUP BY tier, TO_CHAR(shipment_date, 'YYYY-MM')
+                ORDER BY year_month, tier;
+            """)
 
-    cursor.execute("SELECT COUNT(*) FROM analytics.shipping_spend_by_tier;")
-    row_count = cursor.fetchone()[0]
-    print(f"  Inserted {row_count} rows into analytics.shipping_spend_by_tier")
+            cursor.execute("SELECT COUNT(*) FROM analytics.shipping_spend_by_tier;")
+            row_count = cursor.fetchone()[0]
+            logger.info("Inserted %s rows into analytics.shipping_spend_by_tier", row_count)
 
-    conn.commit()
+            metrics["rows_read"] = source_count
+            metrics["rows_written"] = row_count
+            metrics["rows_rejected"] = 0
 
-    # Print summary
-    cursor.execute("""
-        SELECT tier, year_month, total_shipping_spend, shipment_count
-        FROM analytics.shipping_spend_by_tier
-        ORDER BY year_month, tier;
-    """)
-    rows = cursor.fetchall()
+            complete_pipeline_run(pipeline_run_id, "success")
 
-    print(f"\n  {'=== Analytics Summary ===':^50}")
-    print(f"  {'Tier':<15} {'Month':<10} {'Spend':>12} {'Count':>6}")
-    print(f"  {'-'*15} {'-'*10} {'-'*12} {'-'*6}")
+            # Print summary
+            cursor.execute("""
+                SELECT tier, year_month, total_shipping_spend, shipment_count
+                FROM analytics.shipping_spend_by_tier
+                ORDER BY year_month, tier;
+            """)
+            rows = cursor.fetchall()
+
+    logger.info("=== Analytics Summary ===")
+    logger.info("%-15s %-10s %12s %6s", "Tier", "Month", "Spend", "Count")
+    logger.info("%-15s %-10s %12s %6s", "-" * 15, "-" * 10, "-" * 12, "-" * 6)
     for tier, month, spend, count in rows:
-        print(f"  {tier:<15} {month:<10} ${spend:>10,.2f} {count:>6}")
+        logger.info("%-15s %-10s $%10.2f %6s", tier, month, float(spend), count)
 
     cursor.close()
     conn.close()
-    print("\nAnalytics data load completed")
+    logger.info("Analytics data load completed")

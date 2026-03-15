@@ -3,13 +3,16 @@ Extract customer tier data from CSV file.
 Fixes: preserve customer tier history, atomic swap, validation, env credentials.
 """
 import csv
-import os
 from datetime import date
 
-import psycopg2
+from common.config import get_tiers_csv_path
+from common.db import get_connection, transaction
+from common.logging_utils import get_logger
+from common.run_context import get_pipeline_run_id, stage_run
 
 
 ALLOWED_TIERS = {"Bronze", "Silver", "Gold", "Platinum"}
+logger = get_logger(__name__)
 
 
 def _validate_customer_tier_rows(rows):
@@ -113,146 +116,142 @@ def _validate_customer_tier_rows_with_reasons(rows):
     return validated_rows, rejected_rows
 
 
-def extract_customer_tiers_from_csv():
-    print("Starting customer tier extraction...")
+def extract_customer_tiers_from_csv(pipeline_run_id=None):
+    pipeline_run_id = get_pipeline_run_id(pipeline_run_id)
+    logger.info("Starting customer tier extraction for pipeline_run_id=%s", pipeline_run_id)
 
-    csv_path = os.environ.get("TIERS_CSV_PATH", "/opt/airflow/data/customer_tiers.csv")
+    csv_path = get_tiers_csv_path()
 
     with open(csv_path, "r") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
-    print(f"Loaded {len(rows)} rows from CSV")
+    logger.info("Loaded %s rows from CSV", len(rows))
     if not rows:
         raise RuntimeError("Customer tier CSV is empty")
 
     validated_rows, rejected_rows = _validate_customer_tier_rows_with_reasons(rows)
-
-    postgres_host = os.environ.get("POSTGRES_HOST")
-    default_host = postgres_host or "postgres"
-    default_port = "5433" if default_host in {"127.0.0.1", "localhost"} else "5432"
-
-    db_config = {
-        "host": default_host,
-        "port": int(os.environ.get("POSTGRES_PORT", default_port)),
-        "database": os.environ.get("POSTGRES_DB", "airflow"),
-        "user": os.environ.get("POSTGRES_USER", "airflow"),
-        "password": os.environ.get("POSTGRES_PASSWORD", "airflow"),
-    }
-
-    try:
-        conn = psycopg2.connect(**db_config)
-    except psycopg2.OperationalError as exc:
-        if (
-            "POSTGRES_HOST" in os.environ
-            or "POSTGRES_PORT" in os.environ
-            or "could not translate host name" not in str(exc)
-        ):
-            raise
-
-        fallback_config = {**db_config, "host": "127.0.0.1", "port": 5433}
-        conn = psycopg2.connect(**fallback_config)
-
+    conn = get_connection()
     cursor = conn.cursor()
 
-    cursor.execute("CREATE SCHEMA IF NOT EXISTS raw;")
-    cursor.execute("DROP TABLE IF EXISTS raw.customer_tiers_raw;")
-    cursor.execute("""
-        CREATE TABLE raw.customer_tiers_raw (
-            source_row_number INTEGER NOT NULL,
-            customer_id VARCHAR(50),
-            customer_name VARCHAR(200),
-            tier VARCHAR(50),
-            tier_updated_date VARCHAR(50),
-            loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    cursor.execute("DROP TABLE IF EXISTS raw.customer_tier_rejections;")
-    cursor.execute("""
-        CREATE TABLE raw.customer_tier_rejections (
-            source_row_number INTEGER NOT NULL,
-            customer_id VARCHAR(50),
-            customer_name VARCHAR(200),
-            tier VARCHAR(50),
-            tier_updated_date VARCHAR(50),
-            rejection_reason_code VARCHAR(100) NOT NULL,
-            error_message TEXT NOT NULL,
-            loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
+    with transaction(conn):
+        with stage_run(pipeline_run_id, "extract_customer_tiers") as metrics:
+            cursor.execute("CREATE SCHEMA IF NOT EXISTS raw;")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS raw.customer_tiers_raw (
+                    pipeline_run_id TEXT NOT NULL,
+                    source_row_number INTEGER NOT NULL,
+                    customer_id VARCHAR(50),
+                    customer_name VARCHAR(200),
+                    tier VARCHAR(50),
+                    tier_updated_date VARCHAR(50),
+                    loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS customer_tiers_raw_pipeline_run_id_idx ON raw.customer_tiers_raw (pipeline_run_id);"
+            )
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS raw.customer_tier_rejections (
+                    pipeline_run_id TEXT NOT NULL,
+                    source_row_number INTEGER NOT NULL,
+                    customer_id VARCHAR(50),
+                    customer_name VARCHAR(200),
+                    tier VARCHAR(50),
+                    tier_updated_date VARCHAR(50),
+                    rejection_reason_code VARCHAR(100) NOT NULL,
+                    error_message TEXT NOT NULL,
+                    loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS customer_tier_rejections_pipeline_run_id_idx ON raw.customer_tier_rejections (pipeline_run_id);"
+            )
 
-    for source_row_number, row in enumerate(rows, start=2):
-        cursor.execute(
-            """INSERT INTO raw.customer_tiers_raw
-               (source_row_number, customer_id, customer_name, tier, tier_updated_date)
-               VALUES (%s, %s, %s, %s, %s);""",
-            (
-                source_row_number,
-                (row.get("customer_id") or "").strip() or None,
-                (row.get("customer_name") or "").strip() or None,
-                (row.get("tier") or "").strip() or None,
-                (row.get("tier_updated_date") or "").strip() or None,
-            ),
-        )
+            for source_row_number, row in enumerate(rows, start=2):
+                cursor.execute(
+                    """INSERT INTO raw.customer_tiers_raw
+                       (pipeline_run_id, source_row_number, customer_id, customer_name, tier, tier_updated_date)
+                       VALUES (%s, %s, %s, %s, %s, %s);""",
+                    (
+                        pipeline_run_id,
+                        source_row_number,
+                        (row.get("customer_id") or "").strip() or None,
+                        (row.get("customer_name") or "").strip() or None,
+                        (row.get("tier") or "").strip() or None,
+                        (row.get("tier_updated_date") or "").strip() or None,
+                    ),
+                )
 
-    for row in rejected_rows:
-        cursor.execute(
-            """INSERT INTO raw.customer_tier_rejections
-               (source_row_number, customer_id, customer_name, tier, tier_updated_date,
-                rejection_reason_code, error_message)
-               VALUES (%s, %s, %s, %s, %s, %s, %s);""",
-            (
-                row["source_row_number"],
-                row["customer_id"] or None,
-                row["customer_name"] or None,
-                row["tier"] or None,
-                row["tier_updated_date"] or None,
-                row["rejection_reason_code"],
-                row["error_message"],
-            ),
-        )
+            for row in rejected_rows:
+                cursor.execute(
+                    """INSERT INTO raw.customer_tier_rejections
+                       (pipeline_run_id, source_row_number, customer_id, customer_name, tier, tier_updated_date,
+                        rejection_reason_code, error_message)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s);""",
+                    (
+                        pipeline_run_id,
+                        row["source_row_number"],
+                        row["customer_id"] or None,
+                        row["customer_name"] or None,
+                        row["tier"] or None,
+                        row["tier_updated_date"] or None,
+                        row["rejection_reason_code"],
+                        row["error_message"],
+                    ),
+                )
 
-    print(f"Persisted {len(rows)} rows into raw.customer_tiers_raw")
-    print(f"Rejected {len(rejected_rows)} customer tier rows into raw.customer_tier_rejections")
+            logger.info("Persisted %s rows into raw.customer_tiers_raw", len(rows))
+            logger.info(
+                "Rejected %s customer tier rows into raw.customer_tier_rejections",
+                len(rejected_rows),
+            )
 
-    if rejected_rows:
-        conn.commit()
-        cursor.close()
-        conn.close()
-        raise ValueError(rejected_rows[0]["error_message"])
+            if rejected_rows:
+                metrics["rows_read"] = len(rows)
+                metrics["rows_written"] = 0
+                metrics["rows_rejected"] = len(rejected_rows)
+                raise ValueError(rejected_rows[0]["error_message"])
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS staging.customer_tiers (
-            customer_id VARCHAR(50) NOT NULL,
-            customer_name VARCHAR(200),
-            tier VARCHAR(50) NOT NULL,
-            tier_updated_date DATE NOT NULL,
-            CONSTRAINT customer_tiers_customer_id_tier_updated_date_key
-                UNIQUE (customer_id, tier_updated_date),
-            CONSTRAINT customer_tiers_tier_check
-                CHECK (tier IN ('Bronze', 'Silver', 'Gold', 'Platinum'))
-        );
-    """)
-    cursor.execute("TRUNCATE TABLE staging.customer_tiers;")
-    cursor.execute("""
-        INSERT INTO staging.customer_tiers
-            (customer_id, customer_name, tier, tier_updated_date)
-        SELECT
-            customer_id,
-            customer_name,
-            tier,
-            tier_updated_date::DATE
-        FROM raw.customer_tiers_raw
-        WHERE source_row_number NOT IN (
-            SELECT source_row_number
-            FROM raw.customer_tier_rejections
-        )
-        ORDER BY source_row_number;
-    """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS staging.customer_tiers (
+                    customer_id VARCHAR(50) NOT NULL,
+                    customer_name VARCHAR(200),
+                    tier VARCHAR(50) NOT NULL,
+                    tier_updated_date DATE NOT NULL,
+                    CONSTRAINT customer_tiers_customer_id_tier_updated_date_key
+                        UNIQUE (customer_id, tier_updated_date),
+                    CONSTRAINT customer_tiers_tier_check
+                        CHECK (tier IN ('Bronze', 'Silver', 'Gold', 'Platinum'))
+                );
+            """)
+            cursor.execute("TRUNCATE TABLE staging.customer_tiers;")
+            cursor.execute(
+                """
+                INSERT INTO staging.customer_tiers
+                    (customer_id, customer_name, tier, tier_updated_date)
+                SELECT
+                    customer_id,
+                    customer_name,
+                    tier,
+                    tier_updated_date::DATE
+                FROM raw.customer_tiers_raw
+                WHERE pipeline_run_id = %s
+                  AND source_row_number NOT IN (
+                      SELECT source_row_number
+                      FROM raw.customer_tier_rejections
+                      WHERE pipeline_run_id = %s
+                  )
+                ORDER BY source_row_number;
+                """,
+                (pipeline_run_id, pipeline_run_id),
+            )
 
-    conn.commit()
+            metrics["rows_read"] = len(rows)
+            metrics["rows_written"] = len(validated_rows)
+            metrics["rows_rejected"] = len(rejected_rows)
 
-    print(f"Loaded {len(validated_rows)} customer tier history rows into staging.customer_tiers")
+    logger.info("Loaded %s customer tier history rows into staging.customer_tiers", len(validated_rows))
     cursor.close()
     conn.close()
-    print("Customer tier extraction completed")
+    logger.info("Customer tier extraction completed")
