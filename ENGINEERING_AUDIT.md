@@ -1,14 +1,14 @@
 # Engineering Audit — Shipment Analytics Pipeline
 
 **Auditor:** Abdullah Al Junaibi  
-**Date:** March 10, 2026  
+**Date:** March 15, 2026  
 **Scope:** Full pipeline audit — infrastructure, extraction, transformation, loading, and orchestration
 
 ---
 
 ## Executive Summary
 
-The pipeline contained **14 distinct issues** spanning security vulnerabilities, data quality bugs, infrastructure conflicts, and missing resilience patterns. All issues have been identified, categorized, and resolved. The fixed pipeline passes 27 automated tests covering extraction validation, raw ingest auditability, transformation correctness, analytics integrity, and idempotency.
+The pipeline contained **14 distinct issues** spanning security vulnerabilities, data quality bugs, infrastructure conflicts, and missing resilience patterns. All issues have been identified, categorized, and resolved. Production hardening since the initial audit added a shared utility layer in `scripts/common/`, structured run observability in `ops.pipeline_runs` and `ops.stage_runs`, append-only raw/rejection ledgers keyed by `pipeline_run_id`, atomic table swaps across staging and analytics loads, and environment-based credential management via `.env.example` and Docker Compose substitution. The fixed pipeline now passes 35 automated tests covering extraction validation, raw ingest auditability, transformation correctness, analytics integrity, idempotency, and hardening regressions.
 
 ---
 
@@ -130,6 +130,30 @@ The pipeline contained **14 distinct issues** spanning security vulnerabilities,
 
 ---
 
+## Production Hardening Additions
+
+### Ops Observability
+- **Implementation:** `scripts/common/run_context.py` now creates and writes to `ops.pipeline_runs` and `ops.stage_runs`.
+- **Detail:** Every pipeline execution gets a `pipeline_run_id` generated from `uuid.uuid4()` or derived deterministically from Airflow context. Stage execution metadata is tracked per `stage_name` with `started_at`, `finished_at`, `status`, `retry_count`, `rows_read`, `rows_written`, `rows_rejected`, and `error_message`.
+- **Operational value:** This replaces ad hoc log-only monitoring with queryable metadata. Operators can inspect one run end-to-end, compare retries, and reconcile row counts across `extract_shipments`, `extract_customer_tiers`, `transform_data`, and `load_analytics`.
+
+### Append-Only Raw Layer
+- **Implementation:** `scripts/extract_shipments.py` writes to `raw.shipments_raw` and `raw.shipment_rejections`; `scripts/extract_customer_tiers.py` writes to `raw.customer_tiers_raw` and `raw.customer_tier_rejections`.
+- **Detail:** These raw and rejection tables are append-only and include `pipeline_run_id` on every row. Indexes `shipments_raw_pipeline_run_id_idx`, `shipment_rejections_pipeline_run_id_idx`, `customer_tiers_raw_pipeline_run_id_idx`, and `customer_tier_rejections_pipeline_run_id_idx` support run-scoped filtering.
+- **Operational value:** Source history is preserved across reruns instead of being overwritten, which makes it possible to answer "what did the pipeline ingest and reject on run X?" without reconstructing state from logs.
+
+### Atomic Table Swaps
+- **Implementation:** The pipeline now uses `CREATE ..._new`, populate, `DROP` old table, then `ALTER TABLE ..._new RENAME TO ...` for `staging.customer_tiers`, `staging.shipments`, and `analytics.shipping_spend_by_tier`.
+- **Detail:** This pattern keeps the current production table in place until the replacement dataset has been fully validated and loaded.
+- **Operational value:** Readers either see the old complete table or the new complete table, which provides effectively zero-downtime refresh semantics for this batch pipeline. A failed load no longer leaves `customer_tiers` or analytics half-written or empty.
+
+### Credential Externalization
+- **Implementation:** `.env.example` now documents `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `AIRFLOW_ADMIN_USER`, `AIRFLOW_ADMIN_PASSWORD`, `AIRFLOW_ADMIN_EMAIL`, `API_PORT`, and `PG_HOST_PORT`.
+- **Detail:** `docker-compose.yml` uses `${VAR:-default}` substitution for PostgreSQL and Airflow settings, while `scripts/common/config.py` resolves runtime configuration from environment variables with local defaults.
+- **Operational value:** Credentials and ports are configurable without source edits, and `.env` remains outside version control while `.env.example` documents the required interface.
+
+---
+
 ## Test Coverage
 
 | Category | Tests | Status |
@@ -138,7 +162,8 @@ The pipeline contained **14 distinct issues** spanning security vulnerabilities,
 | Transformation | 4 tests (row count, orphan mapping, effective-dated join, tier coverage) | ✅ All pass |
 | Analytics | 6 tests (data exists, row count, monthly totals, no negatives, spend match, no dupes) | ✅ All pass |
 | Idempotency | 1 test (TRUNCATE + INSERT stability) | ✅ All pass |
-| **Total** | **27 tests** | **✅ 27/27 pass** |
+| Hardening | 8 tests (ops audit rows, append-only raw history, index coverage, fail-fast guards, retry/error handling) | ✅ All pass |
+| **Total** | **35 tests** | **✅ 35/35 pass** |
 
 ---
 
@@ -152,5 +177,12 @@ The pipeline contained **14 distinct issues** spanning security vulnerabilities,
 | `scripts/extract_customer_tiers.py` | Raw ingest ledger, rejection ledger, effective-dated history preservation, atomic swap, env vars |
 | `scripts/transform_data.py` | LEFT JOIN + COALESCE, effective-dated customer tier history join, atomic swap, source validation, env vars |
 | `scripts/load_analytics.py` | Idempotent TRUNCATE+INSERT, env vars, analytics summary output |
-| `tests/test_pipeline.py` | 27 automated tests across 4 categories |
+| `scripts/common/config.py` | Shared environment-backed configuration helpers for database, API, and CSV paths |
+| `scripts/common/db.py` | Shared connection and transaction helpers |
+| `scripts/common/logging_utils.py` | Shared logger initialization for consistent structured stage output |
+| `scripts/common/run_context.py` | Shared pipeline/stage run tracking, UUID generation, and ops schema writes |
+| `.env.example` | Sample environment contract for credentials and host port overrides |
+| `docker-compose.yml` | `${VAR:-default}` substitution for runtime configuration and credential injection |
+| `tests/test_pipeline.py` | 27 automated functional tests across 4 categories |
+| `tests/test_hardening.py` | 8 production-hardening regression tests |
 | `tests/conftest.py` | Test configuration and DB connection helper |
