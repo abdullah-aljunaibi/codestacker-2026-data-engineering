@@ -18,8 +18,8 @@ def transform_shipment_data(pipeline_run_id=None):
     conn = get_connection()
     cursor = conn.cursor()
 
-    with transaction(conn):
-        with stage_run(pipeline_run_id, "transform_data") as metrics:
+    with stage_run(pipeline_run_id, "transform_data") as metrics:
+        with transaction(conn):
             # Validate sources exist
             cursor.execute("SELECT COUNT(*) FROM staging.shipments;")
             ship_count = cursor.fetchone()[0]
@@ -90,3 +90,7 @@ def transform_shipment_data(pipeline_run_id=None):
     conn.close()
     logger.info("Data transformation completed")
     return pipeline_run_id
+
+
+if __name__ == "__main__":
+    transform_shipment_data()

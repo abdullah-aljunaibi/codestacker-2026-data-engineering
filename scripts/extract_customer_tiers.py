@@ -134,8 +134,8 @@ def extract_customer_tiers_from_csv(pipeline_run_id=None):
     conn = get_connection()
     cursor = conn.cursor()
 
-    with transaction(conn):
-        with stage_run(pipeline_run_id, "extract_customer_tiers") as metrics:
+    with stage_run(pipeline_run_id, "extract_customer_tiers") as metrics:
+        with transaction(conn):
             cursor.execute("CREATE SCHEMA IF NOT EXISTS raw;")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS raw.customer_tiers_raw (
@@ -266,3 +266,7 @@ def extract_customer_tiers_from_csv(pipeline_run_id=None):
     conn.close()
     logger.info("Customer tier extraction completed")
     return pipeline_run_id
+
+
+if __name__ == "__main__":
+    extract_customer_tiers_from_csv()

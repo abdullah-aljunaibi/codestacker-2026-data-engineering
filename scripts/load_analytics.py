@@ -17,8 +17,8 @@ def load_analytics_data(pipeline_run_id=None):
     conn = get_connection()
     cursor = conn.cursor()
 
-    with transaction(conn):
-        with stage_run(pipeline_run_id, "load_analytics") as metrics:
+    with stage_run(pipeline_run_id, "load_analytics") as metrics:
+        with transaction(conn):
             # Validate source
             cursor.execute("SELECT COUNT(*) FROM staging.shipments_with_tiers;")
             source_count = cursor.fetchone()[0]
@@ -94,3 +94,7 @@ def load_analytics_data(pipeline_run_id=None):
     conn.close()
     logger.info("Analytics data load completed")
     return pipeline_run_id
+
+
+if __name__ == "__main__":
+    load_analytics_data()

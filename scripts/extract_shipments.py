@@ -115,8 +115,8 @@ def extract_shipments_from_api(pipeline_run_id=None):
         REJECTION_CANCELLED,
     )
 
-    with transaction(conn):
-        with stage_run(pipeline_run_id, "extract_shipments", retry_count=retry_count) as metrics:
+    with stage_run(pipeline_run_id, "extract_shipments", retry_count=retry_count) as metrics:
+        with transaction(conn):
             cursor.execute("CREATE SCHEMA IF NOT EXISTS raw;")
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS raw.shipments_raw (
@@ -276,3 +276,7 @@ def extract_shipments_from_api(pipeline_run_id=None):
     conn.close()
     logger.info("Shipment data extraction completed")
     return pipeline_run_id
+
+
+if __name__ == "__main__":
+    extract_shipments_from_api()
