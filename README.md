@@ -80,6 +80,19 @@ pip install psycopg2-binary pytest
 cd tests && python -m pytest test_pipeline.py -v
 ```
 
+## Development
+
+For day-to-day local work:
+
+```bash
+make up       # Start postgres, API, and Airflow services
+make down     # Stop all services
+make test     # Run the full pytest suite
+make refresh  # Run the pipeline locally against postgres on 5433
+```
+
+CI runs on every push to `main` and every pull request targeting `main` via GitHub Actions.
+
 ### Stop Services
 
 ```bash
